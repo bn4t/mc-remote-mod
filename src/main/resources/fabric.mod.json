@@ -1,0 +1,27 @@
+{
+	"schemaVersion": 1,
+	"id": "mcremote",
+	"version": "${version}",
+	"name": "MC Remote",
+	"description": "Client-side remote control for Minecraft: exposes structured world state (blocks, entities, player, inventory) and accepts remote actions over a local JSON/HTTP API and an MCP (streamable HTTP) endpoint, so an external agent can observe and play the game.",
+	"authors": [
+		"bn4t"
+	],
+	"contact": {
+		"sources": "https://github.com/bn4t/mc-remote-mod"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/mcremote/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"io.github.bn4t.mcremote.McRemoteClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
