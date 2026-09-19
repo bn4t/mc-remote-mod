@@ -1,0 +1,23 @@
+pluginManagement {
+	repositories {
+		maven {
+			name = 'Fabric'
+			url = 'https://maven.fabricmc.net/'
+		}
+		// Official Google Cloud Storage mirror of Maven Central. Listed before
+		// mavenCentral so builds still work where repo.maven.apache.org is blocked.
+		maven {
+			name = 'MavenCentralGCS'
+			url = 'https://maven-central.storage-download.googleapis.com/maven2/'
+		}
+		mavenCentral()
+		gradlePluginPortal()
+	}
+}
+
+plugins {
+	// Allows Gradle to auto-provision the Java 25 toolchain required by Minecraft 26.x
+	id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'mc-remote-mod'
