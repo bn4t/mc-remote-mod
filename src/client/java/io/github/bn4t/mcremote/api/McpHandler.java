@@ -224,7 +224,8 @@ public class McpHandler {
 		return switch (tool) {
 			case "look", "move", "jump", "attack", "use", "interact_entity", "mine",
 					"use_on_block", "walk_to", "select_slot", "drop", "say", "command",
-					"respawn", "close_screen", "click_slot", "wait", "swap_hands" -> tool;
+					"respawn", "close_screen", "click_slot", "wait", "swap_hands",
+					"craft", "open_inventory" -> tool;
 			default -> tool; // unknown -> server returns error
 		};
 	}
@@ -316,6 +317,12 @@ public class McpHandler {
 				req("slot", "integer"),
 				prop("button", "integer", "mouse button (default 0)"),
 				prop("click", "string", "click type (default pickup)"))));
+
+		tools.add(tool("craft", "Craft an item via the recipe book using the inventory 2x2 grid, or the open crafting-table grid (3x3) if a crafting table screen is open. Places the recipe and shift-clicks the result; succeeds only when the item lands in the inventory.", schema(
+				req("item", "string"),
+				prop("all", "boolean", "place all matching ingredients to craft the max (default true)"))));
+
+		tools.add(tool("open_inventory", "Open the player inventory screen (2x2 crafting grid + recipe book).", schema()));
 
 		tools.add(tool("close_screen", "Close any open screen/container.", schema()));
 		tools.add(tool("say", "Send a chat message.", schema(req("message", "string"))));

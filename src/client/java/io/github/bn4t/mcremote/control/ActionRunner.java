@@ -31,6 +31,33 @@ public class ActionRunner {
 		return action.id;
 	}
 
+	/**
+	 * Run a single-tick action on the client thread immediately, bypassing the
+	 * serial queue (so a long-running move/walk can't delay instant commands).
+	 * If the action isn't done after one tick it falls back into the queue.
+	 */
+	public void submitInstant(GameAction a) {
+		runOnClient(() -> {
+			a.markRunning();
+			boolean done;
+			try {
+				done = a.tick(Minecraft.getInstance());
+			} catch (Throwable t) {
+				a.fail("internal error: " + t.getMessage());
+				recent.put(a.id, a);
+				recentOrder.addLast(a.id);
+				return;
+			}
+			if (done) {
+				if (a.status() == GameAction.Status.RUNNING) a.succeed();
+				recent.put(a.id, a);
+				recentOrder.addLast(a.id);
+			} else {
+				queue.add(a);
+			}
+		});
+	}
+
 	public long nextId() { return nextId++; }
 
 	/** Run a task on the client thread at the next tick. */
@@ -78,6 +105,10 @@ public class ActionRunner {
 			current = queue.poll();
 			if (current != null) current.markRunning();
 		}
+		// Inputs are per-tick intent: actions assert the flags they want each
+		// tick, and flags auto-release when no action is asserting them, so a
+		// completed action can never leave a key latched.
+		input.clear();
 		try {
 			if (current != null) {
 				boolean done = current.tick(mc);

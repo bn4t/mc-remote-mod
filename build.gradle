@@ -26,6 +26,15 @@ loom {
 			sourceSet sourceSets.client
 		}
 	}
+
+	// ./gradlew runClient -PjoinWorld="World Name" auto-joins that world on start
+	runs {
+		client {
+			if (project.hasProperty("joinWorld")) {
+				programArgs "--quickPlaySingleplayer", project.property("joinWorld")
+			}
+		}
+	}
 }
 
 dependencies {
