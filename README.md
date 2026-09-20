@@ -61,9 +61,12 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
   "in_world": true,
   "player": {"x": ..., "y": ..., "z": ..., "yaw": ..., "pitch": ...,
              "health": ..., "food": ..., "xp_level": ..., "gamemode": ...,
-             "on_ground": ..., "selected_slot": 0, "effects": [...]},
+             "on_ground": ..., "selected_slot": 0, "effects": [...],
+             "surface_y": 70,     // heightmap top of the player's column
+             "sky_above": true},  // player at/above surface_y (roughly "outdoors")
   "world":  {"dimension": "minecraft:overworld", "day_time": ..., "biome": ...,
-             "raining": false, "difficulty": "normal", "server": "singleplayer"},
+             "raining": false, "difficulty": "normal", "server": "singleplayer",
+             "spawn": {"x":..,"y":..,"z":..}},
   "inventory": {"items": [{"slot":0,"id":"minecraft:iron_pickaxe","count":1,"name":"..."}]},
   "entities": [{"id":12,"type":"minecraft:zombie","x":...,"distance":4.2,
                 "health":20,"hostile":true}],
@@ -84,7 +87,8 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
 ```jsonc
 {"type":"look",   "yaw":90, "pitch":-10}        // yaw 0=S 90=W 180=N -90=E; pitch -90=up 90=down
 {"type":"move",   "forward":1,"strafe":0,"seconds":3,"sprint":true,"jump":false,"yaw":90}
-{"type":"walk_to","x":-635,"z":744,"radius":1.5,"seconds":60} // steer+autojump; fails with "stuck"/"timeout"
+{"type":"walk_to","x":-635,"z":744,"radius":1.5,"seconds":60} // A* pathfind then steer;
+                                   // optional "y": target height; fails "stuck"/"timeout"
 {"type":"jump"}
 {"type":"attack", "entity_id":12,"times":3}     // or omit entity_id to swing at crosshair
 {"type":"use",    "seconds":0.35}               // hold right click (eat/place/interact)
@@ -99,14 +103,13 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
 {"type":"open_inventory"}                              // opens the inventory screen (2x2 craft grid)
 {"type":"close_screen"}
 {"type":"say",    "message":"hello"}
-{"type":"command","command":"/gamemode survival"}
 {"type":"respawn"}
 {"type":"wait",   "seconds":1}
 {"type":"stop"}
 ```
 
 Actions are serialized: one runs per tick, in order. Single-tick actions
-(`look`, `command`, `say`, `select_slot`, `drop`, `swap_hands`, `respawn`,
+(`look`, `say`, `select_slot`, `drop`, `swap_hands`, `respawn`,
 `open_inventory`, `close_screen`, `click_slot`, `interact_entity`,
 `use_on_block`) bypass the queue and run immediately, so a long-held `move`
 can't starve them. Every action returns
@@ -157,5 +160,9 @@ its probability and confidence.
 - Movement/mining/use go through the vanilla input path (`Options` key
   mappings) or `MultiPlayerGameMode`, so anticheat-visible behavior matches a
   human at the keyboard.
-- `walk_to` is greedy steering with auto-jump, not pathfinding — expect it to
-  report `stuck` in dense terrain; re-plan (e.g. `mine` through, or go around).
+- `walk_to` runs A* over the voxel grid (walk, +1 jumps, drops ≤4, headroom
+  and dead-end-pit checks, ≤64-block range, ~12k expansions). When no full
+  route exists it walks toward the closest reachable node and falls back to
+  straight-line steering; repeated failures report `stuck`.
+- There is deliberately no `command`/chat-execution action: an agent playing
+  the game can't `/give` or teleport its way out of a task.

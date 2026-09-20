@@ -104,6 +104,10 @@ public class StateCollector {
 		o.addProperty("fall_distance", p.fallDistance);
 		o.addProperty("gamemode", mc.gameMode != null ? mc.gameMode.getPlayerMode().getName() : "unknown");
 		o.addProperty("selected_slot", p.getInventory().getSelectedSlot());
+		int surfY = mc.level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING,
+				p.getBlockX(), p.getBlockZ());
+		o.addProperty("surface_y", surfY);
+		o.addProperty("sky_above", p.getBlockY() >= surfY);
 		JsonArray effects = new JsonArray();
 		for (MobEffectInstance e : p.getActiveEffects()) {
 			JsonObject eff = new JsonObject();
@@ -130,6 +134,14 @@ public class StateCollector {
 				: (server != null ? server.ip : "unknown"));
 		BlockPos pos = mc.player.blockPosition();
 		level.getBiome(pos).unwrapKey().ifPresent(k -> o.addProperty("biome", k.identifier().toString()));
+		BlockPos sp = level.getRespawnData().pos();
+		if (sp != null) {
+			JsonObject spawn = new JsonObject();
+			spawn.addProperty("x", sp.getX());
+			spawn.addProperty("y", sp.getY());
+			spawn.addProperty("z", sp.getZ());
+			o.add("spawn", spawn);
+		}
 		return o;
 	}
 
@@ -344,6 +356,8 @@ public class StateCollector {
 			"composter", "beacon", "conduit", "rail", "button", "lever", "trapdoor",
 			"fence_gate", "wheat", "carrot", "potato", "beetroot", "cocoa", "cactus",
 			"sugar_cane", "magma", "obsidian", "ice", "snow_block", "powder_snow",
+			"stone", "deepslate", "andesite", "granite", "diorite", "gravel",
+			"sand", "clay", "terracotta", "netherrack", "tuff", "calcite",
 			"cobweb", "sweet_berry", "pointed_dripstone", "sculk", "end_rod", "hopper",
 			"dropper", "dispenser", "observer", "piston", "redstone_wire", "repeater",
 			"comparator", "lectern", "jukebox", "note_block", "dragon_egg", "respawn_anchor"

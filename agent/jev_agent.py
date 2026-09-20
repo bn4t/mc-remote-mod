@@ -193,13 +193,14 @@ def summarize(st, history, task):
         "pos": [round(px, 1), round(py, 1), round(pz, 1)],
         "health": p.get("health"), "food": p.get("food"),
         "gamemode": p.get("gamemode"), "on_ground": p.get("on_ground"),
-        "alive": p.get("alive"),
+        "alive": p.get("alive"), "sky_above": p.get("sky_above"),
         "biome": w.get("biome"), "day_time": w.get("day_time"),
         "hotbar": hotbar, "selected_slot": sel,
         "held": hotbar.get(sel),
         "inventory_counts": inv,
         "looking_at": looking,
         "open_container": (st.get("open_container") or {}).get("title"),
+        "spawn": (st.get("world") or {}).get("spawn"),
         "nearest_entities": ents[:10],
         "notable_blocks": notable,
         "block_palette": [base_name(n) for n in
@@ -222,11 +223,21 @@ def block_at(st, x, y, z):
         return None
 
 
-def candidates(st):
+NEEDS_PICKAXE = ("stone", "deepslate", "andesite", "granite", "diorite",
+                 "tuff", "ore", "cobblestone", "obsidian", "netherrack",
+                 "sandstone", "calcite", "iron_block", "gold_block", "diamond_block")
+
+
+def candidates(st, home=None):
     """Generate candidate actions from live state -> {key: (desc, payload)}."""
     px, py, pz = pos_of(st)
     yaw = math.radians(st.get("player", {}).get("yaw", 0))
     out = {"done": ("Declare the task complete.", None)}
+
+    inv_names = {base_name(i.get("id", "")) for i in
+                 st.get("inventory", {}).get("items", [])}
+    has_pick = any("pickaxe" in n for n in inv_names)
+    pick_warn = "" if has_pick else " (WARNING: no pickaxe held — drops nothing without one)"
 
     notable = sorted(
         (b for b in st.get("blocks", {}).get("notable", [])),
@@ -240,8 +251,9 @@ def candidates(st):
         seen.add(name)
         if d <= 5.2:
             if mine_n < 4:
+                warn = pick_warn if any(k in name for k in NEEDS_PICKAXE) else ""
                 out[f"mine {name} @{bx},{by},{bz}"] = (
-                    f"Mine the {name} at ({bx},{by},{bz}), {d:.0f} blocks away.",
+                    f"Mine the {name} at ({bx},{by},{bz}), {d:.0f} blocks away." + warn,
                     {"type": "mine", "x": bx, "y": by, "z": bz})
                 mine_n += 1
         elif d <= 45:
@@ -285,8 +297,8 @@ def candidates(st):
     if held_item and any(k in held_item for k in
             ("table", "furnace", "chest", "torch", "block", "planks", "log",
              "ice", "dirt", "stone", "bed", "ladder", "boat", "sapling")):
-        gx, gz = round(px - math.sin(yaw) * 1.6), round(pz + math.cos(yaw) * 1.6)
-        gy = round(py) - 1
+        gx, gz = math.floor(px - math.sin(yaw) * 1.6), math.floor(pz + math.cos(yaw) * 1.6)
+        gy = math.floor(py) - 1
         gb = base_name(block_at(st, gx, gy, gz) or "")
         gab = base_name(block_at(st, gx, gy + 1, gz) or "")
         # the cell above must be air or the ray clips the cover (leaf litter etc)
@@ -296,7 +308,7 @@ def candidates(st):
                 f"in front of you.",
                 {"type": "use_on_block", "x": gx, "y": gy, "z": gz, "face": "up"})
         # also try the ground blocks adjacent to the player's feet
-        fx, fy, fz = round(px), round(py) - 1, round(pz)
+        fx, fy, fz = math.floor(px), math.floor(py) - 1, math.floor(pz)
         for nx, nz in ((fx + 1, fz), (fx - 1, fz), (fx, fz + 1), (fx, fz - 1)):
             nb = base_name(block_at(st, nx, fy, nz) or "")
             above = base_name(block_at(st, nx, fy + 1, nz) or "")
@@ -314,17 +326,28 @@ def candidates(st):
                                 {"type": "walk_to", "x": round(px + dx),
                                  "z": round(pz + dz)})
     # digging: block ahead at feet level, and the block under feet
-    ax, az = round(px - math.sin(yaw) * 1.6), round(pz + math.cos(yaw) * 1.6)
-    n_ahead = base_name(block_at(st, ax, round(py), az) or "block")
+    ax, az = math.floor(px - math.sin(yaw) * 1.6), math.floor(pz + math.cos(yaw) * 1.6)
+    fy = math.floor(py)
+    n_ahead = base_name(block_at(st, ax, fy, az) or "block")
     if n_ahead != "air":
-        out[f"mine {n_ahead} ahead @{ax},{round(py)},{az}"] = (
-            f"Mine the {n_ahead} straight ahead at feet level ({ax},{round(py)},{az}).",
-            {"type": "mine", "x": ax, "y": round(py), "z": az})
-    n_below = base_name(block_at(st, round(px), round(py) - 1, round(pz)) or "block")
+        out[f"mine {n_ahead} ahead @{ax},{fy},{az}"] = (
+            f"Mine the {n_ahead} straight ahead at feet level ({ax},{fy},{az}).",
+            {"type": "mine", "x": ax, "y": fy, "z": az})
+    bx, by, bz = math.floor(px), fy - 1, math.floor(pz)
+    n_below = base_name(block_at(st, bx, by, bz) or "block")
     if n_below not in ("air", "water"):
-        out[f"mine {n_below} below @{round(px)},{round(py - 1)},{round(pz)}"] = (
-            f"Mine the {n_below} under your feet ({round(px)},{round(py - 1)},{round(pz)}).",
-            {"type": "mine", "x": round(px), "y": round(py) - 1, "z": round(pz)})
+        warn = pick_warn if any(k in n_below for k in NEEDS_PICKAXE) else ""
+        out[f"mine {n_below} below @{bx},{by},{bz}"] = (
+            f"Mine the {n_below} under your feet ({bx},{by},{bz})." + warn,
+            {"type": "mine", "x": bx, "y": by, "z": bz})
+    if home:
+        hx, hy, hz = home
+        buried = not st.get("player", {}).get("sky_above", True)
+        if buried or dist2d(px, pz, hx, hz) > 60:
+            out["return to surface"] = (
+                f"Pathfind back to the open surface at ({hx:.0f},{hy:.0f},{hz:.0f}) "
+                f"(you are at y={py:.0f}, {dist2d(px, pz, hx, hz):.0f} blocks away).",
+                {"type": "walk_to", "x": hx, "y": hy, "z": hz, "radius": 2.5})
 
     for it in st.get("inventory", {}).get("items", []):
         n = base_name(it.get("id", ""))
@@ -363,8 +386,17 @@ def main():
     print(f"[jev-agent] model={MODEL} task={task!r}", flush=True)
     history = []
 
+    home = None
     for step in range(1, MAX_STEPS + 1):
         st = api("/v1/state?blocks=32")
+        pl = st.get("player", {})
+        if st.get("in_world") and pl.get("alive"):
+            if pl.get("sky_above"):
+                # remember the last outdoor position — the way back to the surface
+                home = pos_of(st)
+            elif home is None and pl.get("surface_y"):
+                # started underground: aim for open ground above this column
+                home = (pl.get("x", 0), pl["surface_y"], pl.get("z", 0))
         if not st.get("in_world"):
             why = st.get("error") or st.get("http_error") or st.get("screen") or st
             print(f"[{step}] not in world ({why}), waiting", flush=True)
@@ -376,12 +408,21 @@ def main():
             history.append({"act": "respawn", "status": "done", "ok": True})
             continue
         summ = summarize(st, history, task)
-        cands = candidates(st)
+        cands = candidates(st, home)
         # suppress candidates that already failed recently (stop retry loops)
         recent_fails = [h["act"] for h in history[-6:] if not h.get("ok")]
         cands = {k: v for k, v in cands.items()
                  if not any(k == rf or (k.startswith(rf.split(" @")[0] + " @") and rf.startswith(k.split(" @")[0]))
                             for rf in recent_fails)} or cands
+        # a select changes nothing but the held slot — don't allow two in a row,
+        # and never offer re-selecting the item already held (JEV ping-pong fix)
+        if history and history[-1].get("act", "").startswith("select "):
+            cands = {k: v for k, v in cands.items()
+                     if not k.startswith("select ")} or cands
+        held0 = (summ.get("held") or "").rsplit("x", 1)[0]
+        if held0:
+            cands = {k: v for k, v in cands.items()
+                     if k != "select " + held0} or cands
         ans = jev(summ, {
             "act": {"type": "choice",
                     "instructions": "Pick the single best next action to progress the task. "
@@ -398,10 +439,17 @@ def main():
         print(f"[{step}] done={done_p:.2f} conf={ans.get('act', {}).get('confidence')} "
               f"pick={pick} top={sorted(probs.items(), key=lambda x: -x[1])[:3]}", flush=True)
 
-        if done_p >= DONE_THRESH or pick == "done":
-            print(f"[jev-agent] task complete (done_p={done_p:.2f})", flush=True)
-            print("inventory:", json.dumps(summ["inventory_counts"]))
-            return
+        if pick == "done":
+            if done_p >= DONE_THRESH:
+                print(f"[jev-agent] task complete (done_p={done_p:.2f})", flush=True)
+                print("inventory:", json.dumps(summ["inventory_counts"]))
+                return
+            # JEV's two answers disagree — record the premature 'done' as a
+            # failure so the next step suppresses it and keeps working
+            history.append({"act": "done", "status": "failed", "ok": False,
+                            "error": f"declared done but done_p={done_p:.2f}"})
+            print(f"      -> ignored premature done (done_p={done_p:.2f})", flush=True)
+            continue
 
         desc, payload = cands.get(pick, (None, None))
         if payload is None:
@@ -440,6 +488,13 @@ def main():
                 res = {"status": "failed",
                        "error": f"walked to drop but no {payload['_pickup']} collected"}
         ok = bool(res.get("ok")) and res.get("status") not in ("failed", "cancelled")
+        # a bare-handed pickaxe-block mine "succeeds" but drops nothing — say so
+        has_pick = any("pickaxe" in k for k in summ["inventory_counts"])
+        if ok and payload.get("type") == "mine" and not has_pick and pick and (
+                any(k in pick.split(" @")[0] for k in NEEDS_PICKAXE)):
+            ok = False
+            res["status"] = "failed"
+            res["error"] = "broke it bare-handed — no drop without a pickaxe"
         note = {"act": pick, "status": res.get("status"), "ok": ok}
         if res.get("message"):
             note["msg"] = res["message"]

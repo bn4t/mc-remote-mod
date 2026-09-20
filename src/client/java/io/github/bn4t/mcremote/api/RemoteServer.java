@@ -246,7 +246,7 @@ public class RemoteServer {
 
 	/** Single-tick actions that bypass the serial action queue. */
 	private static final java.util.Set<String> INSTANT_TYPES = java.util.Set.of(
-			"look", "command", "say", "select_slot", "drop", "swap_hands",
+			"look", "say", "select_slot", "drop", "swap_hands",
 			"respawn", "open_inventory", "close_screen", "click_slot",
 			"interact_entity", "use_on_block");
 

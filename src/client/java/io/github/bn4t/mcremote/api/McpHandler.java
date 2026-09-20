@@ -223,7 +223,7 @@ public class McpHandler {
 	private String toolToActionType(String tool) {
 		return switch (tool) {
 			case "look", "move", "jump", "attack", "use", "interact_entity", "mine",
-					"use_on_block", "walk_to", "select_slot", "drop", "say", "command",
+					"use_on_block", "walk_to", "select_slot", "drop", "say",
 					"respawn", "close_screen", "click_slot", "wait", "swap_hands",
 					"craft", "open_inventory" -> tool;
 			default -> tool; // unknown -> server returns error
@@ -326,7 +326,6 @@ public class McpHandler {
 
 		tools.add(tool("close_screen", "Close any open screen/container.", schema()));
 		tools.add(tool("say", "Send a chat message.", schema(req("message", "string"))));
-		tools.add(tool("command", "Run a slash command.", schema(req("command", "string"))));
 		tools.add(tool("respawn", "Respawn when dead.", schema()));
 		tools.add(tool("wait", "Do nothing for 'seconds' (in the action queue).", schema(prop("seconds", "number", "default 1"))));
 		tools.add(tool("stop", "Stop all inputs and cancel queued actions immediately.", schema()));

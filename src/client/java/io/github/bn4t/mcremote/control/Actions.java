@@ -41,7 +41,6 @@ public final class Actions {
 			case "drop" -> new Drop(id, req);
 			case "swap_hands" -> new KeyPress(id, o -> o.keySwapOffhand);
 			case "say" -> new Say(id, req);
-			case "command" -> new Command(id, req);
 			case "respawn" -> new Respawn(id);
 			case "close_screen" -> new CloseScreen(id);
 			case "click_slot" -> new ClickSlot(id, req);
@@ -271,37 +270,85 @@ public final class Actions {
 
 	static class WalkTo extends GameAction {
 		private final double tx, tz;
+		private final Integer ty;
 		private final double arrive;
 		private int ticksLeft;
+		private java.util.List<BlockPos> path;
+		private int idx, repaths, repathCd;
 		private double lastX = Double.NaN, lastZ;
+		private double goalY = Double.NaN;
 		private int stuckTicks;
 		WalkTo(long id, JsonObject r) {
 			super(id, "walk_to");
 			tx = getD(r, "x", 0);
 			tz = getD(r, "z", 0);
+			ty = r.has("y") ? getI(r, "y", 0) : null;
 			arrive = getD(r, "radius", 1.5);
-			ticksLeft = (int) (getD(r, "seconds", 60) * 20);
+			ticksLeft = (int) (getD(r, "seconds", 90) * 20);
 		}
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
 			if (p == null) { fail("not in world"); return true; }
-			if (--ticksLeft <= 0) { fail("timeout"); return true; }
+			if (--ticksLeft <= 0) { clearInput(); fail("timeout"); return true; }
 			double dx = tx - p.getX();
 			double dz = tz - p.getZ();
-			if (dx * dx + dz * dz <= arrive * arrive) return true;
-			// stuck detection: <0.05 blocks progress over 4s
+			boolean near = dx * dx + dz * dz <= arrive * arrive;
+			if (near && ty != null) {
+				double want = Double.isNaN(goalY) ? ty : goalY;
+				near = Math.abs(p.getY() - want) <= 2.5;
+			}
+			if (near) { clearInput(); return true; }
+			if (path == null) {
+				if (repathCd <= 0) {
+					repathCd = 15;
+					if (++repaths > 10) { clearInput(); fail("stuck"); return true; }
+					path = Pathfinder.findPath(mc,
+							BlockPos.containing(p.getX(), p.getY(), p.getZ()), tx, tz, arrive, ty);
+					goalY = path == null || ty == null ? Double.NaN
+							: path.get(path.size() - 1).getY();
+					idx = 0;
+				}
+				repathCd--;
+			}
+			if (path == null) {
+				// no route found — fall back to straight-line steering + auto-jump
+				float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+				p.setYRot(yaw);
+				p.setYHeadRot(yaw);
+				McRemoteHolder.actions().input().set(1f, 0f,
+						p.horizontalCollision && p.onGround(), false, true);
+			} else {
+				// advance past reached nodes; bail if we fell off the path
+				while (idx < path.size()) {
+					BlockPos n = path.get(idx);
+					if (Math.abs(p.getY() - n.getY()) > 1.5) break;
+					if (Math.hypot(n.getX() + 0.5 - p.getX(), n.getZ() + 0.5 - p.getZ()) < 0.6) {
+						idx++;
+						continue;
+					}
+					break;
+				}
+				if (idx >= path.size()) { path = null; return false; }
+				BlockPos n = path.get(idx);
+				float yaw = (float) Math.toDegrees(
+						Math.atan2(-(n.getX() + 0.5 - p.getX()), n.getZ() + 0.5 - p.getZ()));
+				p.setYRot(yaw);
+				p.setYHeadRot(yaw);
+				boolean jump = n.getY() > Math.floor(p.getY())
+						|| (p.horizontalCollision && p.onGround());
+				McRemoteHolder.actions().input().set(1f, 0f, jump, false, true);
+			}
 			if (Double.isNaN(lastX) || p.getX() != lastX || p.getZ() != lastZ) {
-				double moved = Double.isNaN(lastX) ? 1 : Math.hypot(p.getX() - lastX, p.getZ() - lastZ);
+				double moved = Double.isNaN(lastX) ? 1
+						: Math.hypot(p.getX() - lastX, p.getZ() - lastZ);
 				stuckTicks = moved < 0.02 ? stuckTicks + 1 : 0;
 				lastX = p.getX(); lastZ = p.getZ();
 			}
-			if (stuckTicks > 80) { fail("stuck"); return true; }
-			float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-			p.setYRot(yaw);
-			p.setYHeadRot(yaw);
-			// hold jump while colliding horizontally and on the ground
-			boolean jump = p.horizontalCollision && p.onGround();
-			McRemoteHolder.actions().input().set(1f, 0f, jump, false, true);
+			if (stuckTicks > 60) {
+				path = null;
+				stuckTicks = 0;
+				if (++repaths > 6) { clearInput(); fail("stuck"); return true; }
+			}
 			return false;
 		}
 		@Override void succeed() { clearInput(); super.succeed(); }
@@ -363,22 +410,6 @@ public final class Actions {
 			if (p == null) { fail("not in world"); return true; }
 			if (message.isEmpty()) { fail("empty message"); return true; }
 			p.connection.sendChat(message);
-			return true;
-		}
-	}
-
-	static class Command extends GameAction {
-		private final String command;
-		Command(long id, JsonObject r) {
-			super(id, "command");
-			command = r.has("command") ? r.get("command").getAsString() : "";
-		}
-		@Override protected boolean tick(Minecraft mc) {
-			LocalPlayer p = requirePlayer(mc);
-			if (p == null) { fail("not in world"); return true; }
-			String c = command.startsWith("/") ? command.substring(1) : command;
-			if (c.isEmpty()) { fail("empty command"); return true; }
-			p.connection.sendCommand(c);
 			return true;
 		}
 	}
