@@ -108,6 +108,7 @@ public class StateCollector {
 				p.getBlockX(), p.getBlockZ());
 		o.addProperty("surface_y", surfY);
 		o.addProperty("sky_above", p.getBlockY() >= surfY);
+		o.add("terrain", terrain(mc, p));
 		JsonArray effects = new JsonArray();
 		for (MobEffectInstance e : p.getActiveEffects()) {
 			JsonObject eff = new JsonObject();
@@ -148,6 +149,40 @@ public class StateCollector {
 			}
 		} catch (Throwable ignored) {}
 		return arr;
+	}
+
+	/** Surface-height slice around the player: an 9x9 grid of surface_y - player_y
+	 * (negative = ground drops away) plus per-compass-direction drops at +4/+8. */
+	private JsonObject terrain(Minecraft mc, LocalPlayer p) {
+		JsonObject t = new JsonObject();
+		int px = p.getBlockX(), py = p.getBlockY(), pz = p.getBlockZ();
+		JsonArray hmap = new JsonArray();
+		for (int dz = -4; dz <= 4; dz++) {
+			JsonArray row = new JsonArray();
+			for (int dx = -4; dx <= 4; dx++) {
+				int h = mc.level.getHeight(
+						net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING,
+						px + dx, pz + dz);
+				row.add(h - py);
+			}
+			hmap.add(row);
+		}
+		t.add("hmap", hmap);
+		JsonObject dirs = new JsonObject();
+		int[][] vec = {{0, -1}, {0, 1}, {1, 0}, {-1, 0}};
+		String[] names = {"north", "south", "east", "west"};
+		for (int i = 0; i < 4; i++) {
+			JsonObject d = new JsonObject();
+			for (int dist : new int[]{4, 8}) {
+				int h = mc.level.getHeight(
+						net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING,
+						px + vec[i][0] * dist, pz + vec[i][1] * dist);
+				d.addProperty("y" + dist, h - py);
+			}
+			dirs.add(names[i], d);
+		}
+		t.add("dirs", dirs);
+		return t;
 	}
 
 	private JsonObject world(Minecraft mc) {

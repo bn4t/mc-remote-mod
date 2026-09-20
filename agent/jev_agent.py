@@ -202,6 +202,8 @@ def summarize(st, history, task):
         "open_container": (st.get("open_container") or {}).get("title"),
         "spawn": (st.get("world") or {}).get("spawn"),
         "nearest_entities": ents[:10],
+        "terrain_dirs": (p.get("terrain") or {}).get("dirs"),
+        "terrain_hmap": (p.get("terrain") or {}).get("hmap"),
         "notable_blocks": notable,
         "block_palette": [base_name(n) for n in
                           (st.get("blocks") or {}).get("palette", [])][:40],
@@ -256,10 +258,26 @@ def candidates(st, home=None):
     yaw = math.radians(st.get("player", {}).get("yaw", 0))
     out = {"done": ("Declare the task complete.", None)}
 
-    inv_names = {base_name(i.get("id", "")) for i in
-                 st.get("inventory", {}).get("items", [])}
-    has_pick = any("pickaxe" in n for n in inv_names)
-    pick_warn = "" if has_pick else " (WARNING: no pickaxe held — drops nothing without one)"
+    inv_list0 = st.get("inventory", {}).get("items", [])
+    sel0 = st.get("player", {}).get("selected_slot", 0)
+    held0 = next((base_name(i["id"]) for i in inv_list0
+                  if i.get("slot") == sel0), "")
+    pick_warn = ("" if "pickaxe" in (held0 or "")
+                 else " (needs a pickaxe HELD — select one first, or it drops nothing)")
+
+    # best melee weapon in the hotbar — attacks select it first
+    weapon_slot = None
+    for rank, names in enumerate(
+            (("netherite_sword", "diamond_sword", "iron_sword", "stone_sword",
+              "golden_sword", "wooden_sword", "netherite_axe", "diamond_axe",
+              "iron_axe", "stone_axe", "wooden_axe"),)):
+        for it in inv_list0:
+            n = base_name(it.get("id", ""))
+            if n in names and 0 <= it.get("slot", -1) <= 8 and n != held0:
+                weapon_slot = (it["slot"], n)
+                break
+        if weapon_slot:
+            break
 
     notable = sorted(
         (b for b in st.get("blocks", {}).get("notable", [])),
@@ -303,9 +321,17 @@ def candidates(st, home=None):
                 f"{d:.0f} blocks away — it points to the stronghold.",
                 {"type": "walk_to", "x": ex, "z": ez, "radius": 2})
         elif d <= 4.5:
+            pay = {"type": "attack", "entity": e.get("id"), "times": 4,
+                   "_verify_kill": e.get("id")}
+            if weapon_slot:
+                pay = {"_macro": [
+                    {"type": "select_slot", "slot": weapon_slot[0]}, pay]}
+                w = f" with the {weapon_slot[1]}"
+            else:
+                w = ""
             out[f"attack {et}"] = (
-                f"Attack the {et} ({d:.0f} blocks away).",
-                {"type": "attack", "entity": e.get("id")})
+                f"Attack the {et}{w} ({d:.0f} blocks away, swing 4x).",
+                pay)
         elif et in APPROACH_ENTITIES and d <= 45 and approach_n < 3:
             out[f"goto {et}"] = (
                 f"Walk toward the {et} at ({ex},{ez}), {d:.0f} blocks away.",
@@ -354,9 +380,13 @@ def candidates(st, home=None):
                      "face": "up"})
                 break
 
+    dirs = (st.get("player", {}).get("terrain") or {}).get("dirs") or {}
     for label, dx, dz in (("north", 0, -32), ("south", 0, 32),
                           ("east", 32, 0), ("west", -32, 0)):
-        out[f"walk {label}"] = (f"Walk ~32 blocks {label} to explore.",
+        d8 = (dirs.get(label) or {}).get("y8")
+        cliff = (f" (DANGER: ground drops ~{-d8} blocks 8 ahead)"
+                 if d8 is not None and d8 <= -5 else "")
+        out[f"walk {label}"] = (f"Walk ~32 blocks {label} to explore." + cliff,
                                 {"type": "walk_to", "x": round(px + dx),
                                  "z": round(pz + dz)})
     # digging: block ahead at feet level, and the block under feet
@@ -597,6 +627,16 @@ def main():
                 res = api("/v1/action?id=" + str(aid))
             if res.get("status") in ("failed", "cancelled"):
                 break
+        # attack verification: did the target actually die?
+        vid = steps[-1].get("_verify_kill") or payload.get("_verify_kill")
+        if vid is not None and res.get("status") == "done":
+            ids = {e.get("id") for e in
+                   api("/v1/state").get("entities", []) or []}
+            if vid in ids:
+                res["status"] = "failed"
+                res["error"] = "target still alive — keep attacking"
+            else:
+                res["message"] = "killed"
         if before_ct is not None and res.get("status") == "done":
             inv1 = api("/v1/state").get("inventory", {}).get("items", [])
             after_ct = sum(i.get("count", 1) for i in inv1
@@ -606,8 +646,8 @@ def main():
                        "error": f"walked to drop but no {payload['_pickup']} collected"}
         ok = bool(res.get("ok")) and res.get("status") not in ("failed", "cancelled")
         # a bare-handed pickaxe-block mine "succeeds" but drops nothing — say so
-        has_pick = any("pickaxe" in k for k in summ["inventory_counts"])
-        if ok and payload.get("type") == "mine" and not has_pick and pick and (
+        held_now = (summ.get("held") or "").rsplit("x", 1)[0]
+        if ok and payload.get("type") == "mine" and "pickaxe" not in (held_now or "") and pick and (
                 any(k in pick.split(" @")[0] for k in NEEDS_PICKAXE)):
             ok = False
             res["status"] = "failed"
