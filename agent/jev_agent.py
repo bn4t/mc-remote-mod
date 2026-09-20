@@ -333,6 +333,13 @@ def candidates(st, home=None):
         out[f"mine {n_ahead} ahead @{ax},{fy},{az}"] = (
             f"Mine the {n_ahead} straight ahead at feet level ({ax},{fy},{az}).",
             {"type": "mine", "x": ax, "y": fy, "z": az})
+    n_up = base_name(block_at(st, ax, fy + 1, az) or "block")
+    if n_up not in ("air", "water") and n_ahead != "air":
+        warn = pick_warn if any(k in n_up for k in NEEDS_PICKAXE) else ""
+        out[f"mine {n_up} above-ahead @{ax},{fy + 1},{az}"] = (
+            f"Mine the {n_up} ahead at head level ({ax},{fy + 1},{az}) — "
+            f"clearing feet+head ahead digs an upward staircase." + warn,
+            {"type": "mine", "x": ax, "y": fy + 1, "z": az})
     bx, by, bz = math.floor(px), fy - 1, math.floor(pz)
     n_below = base_name(block_at(st, bx, by, bz) or "block")
     if n_below not in ("air", "water"):

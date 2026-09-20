@@ -304,6 +304,7 @@ public final class Actions {
 					if (++repaths > 10) { clearInput(); fail("stuck"); return true; }
 					path = Pathfinder.findPath(mc,
 							BlockPos.containing(p.getX(), p.getY(), p.getZ()), tx, tz, arrive, ty);
+					if (path != null && path.isEmpty()) path = null;
 					goalY = path == null || ty == null ? Double.NaN
 							: path.get(path.size() - 1).getY();
 					idx = 0;
@@ -338,12 +339,10 @@ public final class Actions {
 						|| (p.horizontalCollision && p.onGround());
 				McRemoteHolder.actions().input().set(1f, 0f, jump, false, true);
 			}
-			if (Double.isNaN(lastX) || p.getX() != lastX || p.getZ() != lastZ) {
-				double moved = Double.isNaN(lastX) ? 1
-						: Math.hypot(p.getX() - lastX, p.getZ() - lastZ);
-				stuckTicks = moved < 0.02 ? stuckTicks + 1 : 0;
-				lastX = p.getX(); lastZ = p.getZ();
-			}
+			double moved = Double.isNaN(lastX) ? 1
+					: Math.hypot(p.getX() - lastX, p.getZ() - lastZ);
+			stuckTicks = moved < 0.02 ? stuckTicks + 1 : 0;
+			lastX = p.getX(); lastZ = p.getZ();
 			if (stuckTicks > 60) {
 				path = null;
 				stuckTicks = 0;
