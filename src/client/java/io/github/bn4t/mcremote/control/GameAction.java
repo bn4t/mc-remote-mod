@@ -14,6 +14,7 @@ public abstract class GameAction {
 	public final String type;
 	private volatile Status status = Status.QUEUED;
 	private volatile String error;
+	private volatile String message;
 	private final CompletableFuture<JsonObject> result = new CompletableFuture<>();
 
 	protected GameAction(long id, String type) {
@@ -39,6 +40,11 @@ public abstract class GameAction {
 		result.complete(describe());
 	}
 
+	void succeed(String message) {
+		this.message = message;
+		succeed();
+	}
+
 	void cancel() {
 		this.status = Status.CANCELLED;
 		result.complete(describe());
@@ -54,6 +60,7 @@ public abstract class GameAction {
 		o.addProperty("type", type);
 		o.addProperty("status", status.name().toLowerCase());
 		if (error != null) o.addProperty("error", error);
+		if (message != null) o.addProperty("message", message);
 		return o;
 	}
 

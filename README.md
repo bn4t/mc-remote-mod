@@ -18,7 +18,8 @@ Requires Java 25 (auto-provisioned via the Gradle toolchain). Drop the jar into
 Minecraft 26.2.
 
 For development: `./gradlew runClient` launches a dev client with the mod
-enabled (no Mojang account needed).
+enabled (no Mojang account needed). `./gradlew runClient -PjoinWorld="<name>"`
+auto-joins the named singleplayer world via quick play.
 
 ## Configuration
 
@@ -72,7 +73,8 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
              "palette":["minecraft:air","minecraft:stone", ...],
              "data":[0,0,1,...],              // flat y,z,x order; idx=(y*sizeZ+z)*sizeX+x
              "notable":[{"x":..,"y":..,"z":..,"block":"minecraft:chest"}, ...]},
-  "open_container": {"container_id":1,"title":"Chest","slots":[...]},
+  "open_container": {"container_id":1,"title":"Chest","slots":[...],
+                     "crafting_grid":"3x3"},  // present for crafting menus (2x2 inventory / 3x3 table)
   "latest_event_seq": 42
 }
 ```
@@ -93,6 +95,8 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
 {"type":"drop",   "all":false}
 {"type":"swap_hands"}
 {"type":"click_slot","slot":10,"button":0,"click":"pickup"} // pickup|quick_move|swap|throw|clone|pickup_all
+{"type":"craft", "item":"wooden_pickaxe","all":true} // recipe-book craft; uses the open 2x2/3x3 grid
+{"type":"open_inventory"}                              // opens the inventory screen (2x2 craft grid)
 {"type":"close_screen"}
 {"type":"say",    "message":"hello"}
 {"type":"command","command":"/gamemode survival"}
@@ -101,8 +105,12 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
 {"type":"stop"}
 ```
 
-Actions are serialized: one runs per tick, in order. Every action returns
-`{"id":N,"type":...,"status":"queued|running|done|failed|cancelled"}`; `?wait=`
+Actions are serialized: one runs per tick, in order. Single-tick actions
+(`look`, `command`, `say`, `select_slot`, `drop`, `swap_hands`, `respawn`,
+`open_inventory`, `close_screen`, `click_slot`, `interact_entity`,
+`use_on_block`) bypass the queue and run immediately, so a long-held `move`
+can't starve them. Every action returns
+`{"id":N,"type":...,"status":"queued|running|done|failed|cancelled",...}`; `?wait=`
 makes the HTTP call block until terminal status or timeout.
 
 ## MCP endpoint
@@ -124,6 +132,23 @@ Devin session MCP config:
   }
 }
 ```
+
+## JEV agent
+
+`agent/jev_agent.py` is a stdlib-only driver that plays the game through
+[JEV](https://openrouter.ai/typesafe/jev-1.13) (OpenRouter Decisions API):
+each step it summarizes live state, generates candidate actions, asks JEV for a
+probability distribution over them, and executes the argmax. `craft` choices
+go through a second JEV question restricted to recipes whose ingredients are
+actually in inventory (`crafting_grid` tells it whether a 3x3 table is open).
+
+```
+OPENROUTER_API_KEY=... MCREMOTE_TOKEN=<token> \
+  python3 agent/jev_agent.py "Craft a wooden pickaxe"
+```
+
+`MAX_STEPS` (default 150) bounds the loop; the agent prints each decision with
+its probability and confidence.
 
 ## Design notes
 

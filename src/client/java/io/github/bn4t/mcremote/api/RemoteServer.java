@@ -244,6 +244,12 @@ public class RemoteServer {
 		respond(ex, 200, ok());
 	}
 
+	/** Single-tick actions that bypass the serial action queue. */
+	private static final java.util.Set<String> INSTANT_TYPES = java.util.Set.of(
+			"look", "command", "say", "select_slot", "drop", "swap_hands",
+			"respawn", "open_inventory", "close_screen", "click_slot",
+			"interact_entity", "use_on_block");
+
 	/** Shared by REST and MCP: enqueue action, optionally wait for terminal state. */
 	public JsonObject submitAction(JsonObject req, double waitSeconds) {
 		GameAction a;
@@ -261,7 +267,11 @@ public class RemoteServer {
 			o.addProperty("error", "unknown action type: " + (req.has("type") ? req.get("type").getAsString() : ""));
 			return o;
 		}
-		actions.submit(a);
+		if (INSTANT_TYPES.contains(a.type)) {
+			actions.submitInstant(a);
+		} else {
+			actions.submit(a);
+		}
 		if (waitSeconds > 0) {
 			try {
 				JsonObject done = a.result().get((long) (waitSeconds * 1000), TimeUnit.MILLISECONDS);

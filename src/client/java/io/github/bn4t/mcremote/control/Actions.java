@@ -3,12 +3,20 @@ package io.github.bn4t.mcremote.control;
 import com.google.gson.JsonObject;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
+import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.client.gui.screens.recipebook.RecipeCollection;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.StackedItemContents;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.crafting.display.RecipeDisplayEntry;
+import net.minecraft.world.item.crafting.display.SlotDisplayContext;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.inventory.AbstractCraftingMenu;
 import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -37,6 +45,8 @@ public final class Actions {
 			case "respawn" -> new Respawn(id);
 			case "close_screen" -> new CloseScreen(id);
 			case "click_slot" -> new ClickSlot(id, req);
+			case "craft" -> new Craft(id, req);
+			case "open_inventory" -> new OpenInventory(id);
 			case "wait" -> new Wait(id, req);
 			default -> null;
 		};
@@ -197,11 +207,16 @@ public final class Actions {
 			pos = new BlockPos(getI(r, "x", 0), getI(r, "y", 0), getI(r, "z", 0));
 			ticksLeft = (int) (getD(r, "seconds", 30) * 20);
 		}
+		private boolean started;
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
 			if (p == null) { fail("not in world"); return true; }
 			if (--ticksLeft <= 0) { fail("timeout"); return true; }
-			if (mc.level.getBlockState(pos).isAir()) return true;
+			if (mc.level.getBlockState(pos).isAir()) {
+				if (!started) { fail("nothing to mine (air)"); return true; }
+				return true;
+			}
+			started = true;
 			double dist = p.getEyePosition().distanceTo(Vec3.atCenterOf(pos));
 			if (dist > p.blockInteractionRange() + 1) {
 				fail("block out of reach (" + String.format("%.1f", dist) + ")"); return true;
@@ -238,7 +253,10 @@ public final class Actions {
 			LocalPlayer p = requirePlayer(mc);
 			if (p == null) { fail("not in world"); return true; }
 			Vec3 eye = p.getEyePosition();
-			Vec3 target = Vec3.atCenterOf(pos).add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
+			// Aim slightly off-center toward the requested face; the ray hits the
+			// face without grazing coplanar neighbours (which a face-centre aim
+			// does on flat ground).
+			Vec3 target = Vec3.atCenterOf(pos).add(face.getStepX() * 0.25, face.getStepY() * 0.25, face.getStepZ() * 0.25);
 			float[] yp = aimAt(eye, target);
 			p.setYRot(yp[0]); p.setXRot(yp[1]); p.setYHeadRot(yp[0]);
 			HitResult hit = mc.level.clip(new ClipContext(eye, target, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, p));
@@ -405,6 +423,117 @@ public final class Actions {
 			if (p == null) { fail("not in world"); return true; }
 			mc.gameMode.handleContainerInput(p.containerMenu.containerId, slot, button, clickType, p);
 			return true;
+		}
+	}
+
+	/** Opens the player inventory screen (shows the 2x2 grid + recipe book). */
+	static class OpenInventory extends GameAction {
+		OpenInventory(long id) { super(id, "open_inventory"); }
+		@Override protected boolean tick(Minecraft mc) {
+			LocalPlayer p = requirePlayer(mc);
+			if (p == null) { fail("not in world"); return true; }
+			mc.gui.setScreen(new InventoryScreen(p));
+			return true;
+		}
+	}
+
+	/**
+	 * Craft an item via the recipe book: finds a craftable recipe whose result
+	 * matches the requested item, places it into the current crafting grid and
+	 * shift-clicks the result. Uses the always-open inventory 2x2 grid, or an
+	 * open crafting-table container (3x3) if one is on screen.
+	 * Params: item (name, e.g. "oak_planks" or "minecraft:stick"),
+	 *         all (bool, place all matching ingredients for max crafts).
+	 */
+	static class Craft extends GameAction {
+		private final String want;
+		private final boolean all;
+		private int stage = 0, ticks = 0, retries = 0;
+		private int before;
+		private String foundName;
+		Craft(long id, JsonObject r) {
+			super(id, "craft");
+			want = (r.has("item") ? r.get("item").getAsString() : "").toLowerCase();
+			all = getB(r, "all", true);
+		}
+		private static int countItem(LocalPlayer p, String want) {
+			int n = 0;
+			var inv = p.getInventory();
+			for (int i = 0; i < inv.getContainerSize(); i++) {
+				ItemStack s = inv.getItem(i);
+				if (!s.isEmpty() && nameMatches(BuiltInRegistries.ITEM.getKey(s.getItem()).toString(), want))
+					n += s.getCount();
+			}
+			return n;
+		}
+		private static boolean nameMatches(String id, String want) {
+			String base = id.contains(":") ? id.substring(id.indexOf(':') + 1) : id;
+			return base.equals(want) || id.equals(want);
+		}
+		@Override protected boolean tick(Minecraft mc) {
+			LocalPlayer p = requirePlayer(mc);
+			if (p == null) { fail("not in world"); return true; }
+			switch (stage) {
+				case 0 -> {
+					var menu = p.containerMenu;
+					if (!(menu instanceof AbstractCraftingMenu cm)) {
+						fail("current container is not a crafting menu (close_screen first)");
+						return true;
+					}
+					int grid = cm.getGridWidth() * cm.getGridHeight();
+					StackedItemContents sic = new StackedItemContents();
+					var inv = p.getInventory();
+					for (int i = 0; i < inv.getContainerSize(); i++)
+						sic.accountStack(inv.getItem(i));
+					cm.fillCraftSlotsStackedContents(sic);
+					var ctx = SlotDisplayContext.fromLevel(mc.level);
+					RecipeDisplayEntry found = null;
+					outer:
+					for (RecipeCollection col : p.getRecipeBook().getCollections()) {
+						for (RecipeDisplayEntry e : col.getRecipes()) {
+							int need = e.craftingRequirements().map(java.util.List::size).orElse(0);
+							if (need > grid || !e.canCraft(sic)) continue;
+							for (ItemStack r : e.resultItems(ctx)) {
+								String nm = BuiltInRegistries.ITEM.getKey(r.getItem()).toString();
+								if (nameMatches(nm, want)) {
+									found = e; foundName = nm; break outer;
+								}
+							}
+						}
+					}
+					if (found == null) {
+						fail("no craftable recipe for '" + want + "' (missing ingredients, "
+								+ "or needs a " + (grid >= 9 ? "bigger" : "3x3 crafting table") + " grid)");
+						return true;
+					}
+					before = countItem(p, want);
+					mc.gameMode.handlePlaceRecipe(menu.containerId, found.id(), all);
+					stage = 1; ticks = 0;
+				}
+				case 1 -> {
+					if (++ticks >= 4) {
+						var menu = p.containerMenu;
+						int resultIdx = (menu instanceof AbstractCraftingMenu cm)
+								? cm.getResultSlot().index : 0;
+						mc.gameMode.handleContainerInput(menu.containerId, resultIdx, 0,
+								ContainerInput.QUICK_MOVE, p);
+						stage = 2; ticks = 0;
+					}
+				}
+				case 2 -> {
+					if (++ticks >= 8) {
+						int after = countItem(p, want);
+						if (after > before) {
+							succeed("crafted " + (after - before) + "x " + foundName);
+							return true;
+						}
+						if (++retries < 2) { stage = 0; return false; }
+						fail("craft produced no " + want);
+						return true;
+					}
+				}
+			}
+			return false;
 		}
 	}
 

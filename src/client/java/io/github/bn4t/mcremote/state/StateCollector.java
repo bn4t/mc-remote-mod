@@ -15,6 +15,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.inventory.AbstractCraftingMenu;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
@@ -53,6 +54,7 @@ public class StateCollector {
 	/** Must be called on the client thread. */
 	public JsonObject snapshot(Minecraft mc, int blockRadius, int blocksBelow, int blocksAbove) {
 		JsonObject out = new JsonObject();
+		out.addProperty("ok", true);
 		if (mc.player == null || mc.level == null) {
 			out.addProperty("in_world", false);
 			Screen screen = mc.gui.screen();
@@ -163,6 +165,8 @@ public class StateCollector {
 		if (p.containerMenu == p.inventoryMenu) return null;
 		JsonObject o = new JsonObject();
 		o.addProperty("container_id", p.containerMenu.containerId);
+		if (p.containerMenu instanceof AbstractCraftingMenu acm)
+			o.addProperty("crafting_grid", acm.getGridWidth() + "x" + acm.getGridHeight());
 		Screen screen = mc.gui.screen();
 		if (screen != null) o.addProperty("title", screen.getTitle().getString());
 		JsonArray slots = new JsonArray();
@@ -249,7 +253,7 @@ public class StateCollector {
 		paletteIdx.put("minecraft:void_air", 0);
 
 		JsonArray data = new JsonArray();
-		JsonArray notable = new JsonArray();
+		List<JsonObject> notable = new ArrayList<>();
 		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 		for (int y = 0; y < sizeY; y++) {
 			for (int z = 0; z < sizeZ; z++) {
@@ -262,14 +266,14 @@ public class StateCollector {
 						idx = palette.size();
 						palette.add(name);
 						paletteIdx.put(name, idx);
-						if (isNotable(name)) {
-							JsonObject n = new JsonObject();
-							n.addProperty("x", pos.getX());
-							n.addProperty("y", pos.getY());
-							n.addProperty("z", pos.getZ());
-							n.addProperty("block", name);
-							notable.add(n);
-						}
+					}
+					if (isNotable(name)) {
+						JsonObject n = new JsonObject();
+						n.addProperty("x", pos.getX());
+						n.addProperty("y", pos.getY());
+						n.addProperty("z", pos.getZ());
+						n.addProperty("block", name);
+						notable.add(n);
 					}
 					data.add(idx);
 				}
@@ -282,12 +286,26 @@ public class StateCollector {
 		o.addProperty("size_x", sizeX);
 		o.addProperty("size_y", sizeY);
 		o.addProperty("size_z", sizeZ);
+		// keep the closest interesting blocks: scan order is bottom-up, so
+		// without this deep ores would starve surface features under the cap
+		notable.sort((a, b) -> Double.compare(distSq(a, center), distSq(b, center)));
+		while (notable.size() > 256) notable.remove(notable.size() - 1);
+
 		JsonArray pal = new JsonArray();
 		for (String s : palette) pal.add(s);
 		o.add("palette", pal);
 		o.add("data", data);
-		o.add("notable", notable);
+		JsonArray notableArr = new JsonArray();
+		for (JsonObject n : notable) notableArr.add(n);
+		o.add("notable", notableArr);
 		return o;
+	}
+
+	private static double distSq(JsonObject b, BlockPos c) {
+		double dx = b.get("x").getAsDouble() - c.getX();
+		double dy = b.get("y").getAsDouble() - c.getY();
+		double dz = b.get("z").getAsDouble() - c.getZ();
+		return dx * dx + dy * dy + dz * dz;
 	}
 
 	public static String stateName(BlockState state) {
@@ -319,8 +337,8 @@ public class StateCollector {
 	}
 
 	private static final String[] NOTABLE_KEYS = {
-			"ore", "chest", "barrel", "furnace", "smoker", "blast", "table", "anvil",
-			"door", "bed", "lava", "water", "portal", "spawner", "torch", "ladder",
+			"log", "stem", "hyphae", "ore", "chest", "barrel", "furnace", "smoker", "blast", "table", "anvil",
+			"door", "bed", "portal", "spawner", "torch", "ladder",
 			"vine", "fire", "tnt", "sign", "bell", "campfire", "loom", "smithing",
 			"brewing", "enchanting", "grindstone", "stonecutter", "cartography",
 			"composter", "beacon", "conduit", "rail", "button", "lever", "trapdoor",
