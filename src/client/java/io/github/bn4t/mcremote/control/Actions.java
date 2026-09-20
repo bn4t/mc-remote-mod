@@ -67,6 +67,17 @@ public final class Actions {
 		return o.has(k) ? o.get(k).getAsBoolean() : def;
 	}
 
+	/** Current server tick rate — action budgets are wall-clock, not ticks. */
+	private static float tps() {
+		var l = Minecraft.getInstance().level;
+		return l == null ? 20f : Math.max(1f, l.tickRateManager().tickrate());
+	}
+
+	/** seconds param -> tick budget at the CURRENT tick rate. */
+	private static int secs(JsonObject o, String k, double def) {
+		return (int) Math.ceil(getD(o, k, def) * tps());
+	}
+
 	private static LocalPlayer requirePlayer(Minecraft mc) {
 		if (mc.player == null || mc.level == null) return null;
 		return mc.player;
@@ -111,7 +122,7 @@ public final class Actions {
 			yaw = r.has("yaw") ? (float) getD(r, "yaw", 0) : null;
 			pitch = r.has("pitch") ? (float) getD(r, "pitch", 0) : null;
 			double seconds = getD(r, "seconds", 0);
-			ticksLeft = seconds <= 0 ? Integer.MAX_VALUE : (int) (seconds * 20);
+			ticksLeft = seconds <= 0 ? Integer.MAX_VALUE : secs(r, "seconds", 0);
 		}
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
@@ -150,7 +161,7 @@ public final class Actions {
 			super(id, "attack");
 			entityId = r.has("entity_id") ? getI(r, "entity_id", -1) : null;
 			times = Math.max(1, getI(r, "times", 1));
-			ticksLeft = (int) (getD(r, "seconds", 10) * 20);
+			ticksLeft = secs(r, "seconds", 10);
 		}
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
@@ -181,8 +192,7 @@ public final class Actions {
 		private int ticksLeft;
 		Use(long id, JsonObject r) {
 			super(id, "use");
-			double seconds = getD(r, "seconds", 0.35);
-			ticksLeft = Math.max(1, (int) (seconds * 20));
+			ticksLeft = Math.max(1, secs(r, "seconds", 0.35));
 		}
 		@Override protected boolean tick(Minecraft mc) {
 			if (requirePlayer(mc) == null) { fail("not in world"); return true; }
@@ -213,7 +223,7 @@ public final class Actions {
 		Mine(long id, JsonObject r) {
 			super(id, "mine");
 			pos = new BlockPos(getI(r, "x", 0), getI(r, "y", 0), getI(r, "z", 0));
-			ticksLeft = (int) (getD(r, "seconds", 30) * 20);
+			ticksLeft = secs(r, "seconds", 30);
 		}
 		private boolean started;
 		@Override protected boolean tick(Minecraft mc) {
@@ -293,7 +303,7 @@ public final class Actions {
 			tz = getD(r, "z", 0);
 			ty = r.has("y") ? getI(r, "y", 0) : null;
 			arrive = getD(r, "radius", 1.5);
-			ticksLeft = (int) (getD(r, "seconds", 90) * 20);
+			ticksLeft = secs(r, "seconds", 90);
 		}
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
@@ -309,7 +319,7 @@ public final class Actions {
 			if (near) { clearInput(); return true; }
 			if (path == null) {
 				if (repathCd <= 0) {
-					repathCd = 15;
+					repathCd = (int) (0.75 * tps());
 					if (++repaths > 10) { clearInput(); fail("stuck"); return true; }
 					path = Pathfinder.findPath(mc,
 							BlockPos.containing(p.getX(), p.getY(), p.getZ()), tx, tz, arrive, ty);
@@ -352,7 +362,7 @@ public final class Actions {
 					: Math.hypot(p.getX() - lastX, p.getZ() - lastZ);
 			stuckTicks = moved < 0.02 ? stuckTicks + 1 : 0;
 			lastX = p.getX(); lastZ = p.getZ();
-			if (stuckTicks > 60) {
+			if (stuckTicks > (int) (3 * tps())) {
 				path = null;
 				stuckTicks = 0;
 				if (++repaths > 6) { clearInput(); fail("stuck"); return true; }
@@ -472,13 +482,14 @@ public final class Actions {
 	 */
 	static class Pillar extends GameAction {
 		private final int want;
-		private int ticksLeft, noProgress;
+		private int ticksLeft, noProgress, placeCalls;
+		private String lastWhy = "?", lastRes = "?";
 		private double startY;
 		private boolean started;
 		Pillar(long id, JsonObject r) {
 			super(id, "pillar");
 			want = getI(r, "blocks", 3);
-			ticksLeft = (int) (getD(r, "seconds", 20) * 20);
+			ticksLeft = secs(r, "seconds", 20);
 		}
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
@@ -490,32 +501,88 @@ public final class Actions {
 			}
 			if (!started) { started = true; startY = p.getY(); }
 			if (p.getY() - startY >= want) { clearInput(); return true; }
-			p.setXRot(85f);
-			// place into the cell directly beneath the feet; it's only
-			// free of the player's bounding box mid-jump
-			BlockPos target = BlockPos.containing(p.getX(), p.getY() - 1, p.getZ());
-			var tgtState = mc.level.getBlockState(target);
-			BlockPos support = target.below();
-			var supState = mc.level.getBlockState(support);
 			var input = McRemoteHolder.actions().input();
-			boolean placed = false;
-			if ((tgtState.isAir() || tgtState.canBeReplaced())
-					&& !supState.getCollisionShape(mc.level, support).isEmpty()) {
-				Vec3 hit = Vec3.atCenterOf(support).add(0, 0.5, 0);
-				if (hit.distanceTo(p.getEyePosition()) <= p.blockInteractionRange() + 1) {
-					mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND,
-							new BlockHitResult(hit, Direction.UP, support, false));
-					p.swing(InteractionHand.MAIN_HAND);
-					placed = true;
+			// clear headroom first: the cells the head occupies at jump apex.
+			// Only dig while grounded — at apex the same check would catch the
+			// NEXT level's ceiling and steal the placement window.
+			if (p.onGround()) for (int up : new int[]{2, 3}) {
+				BlockPos cell = BlockPos.containing(p.getX(), p.getY() + up, p.getZ());
+				var cs = mc.level.getBlockState(cell);
+				if (!cs.isAir() && !cs.getCollisionShape(mc.level, cell).isEmpty()) {
+					float[] yp = aimAt(p.getEyePosition(), Vec3.atCenterOf(cell));
+					p.setYRot(yp[0]); p.setXRot(yp[1]); p.setYHeadRot(yp[0]);
+					input.attack = true;
+					input.set(0f, 0f, false, false, false);
+					noProgress++;
+					if (noProgress > (int) (10 * tps())) { input.attack = false; fail("can't clear headroom"); return true; }
+					return false;
 				}
 			}
-			input.set(0f, 0f, p.onGround(), false, false);
+			p.setXRot(85f);
+			// place into the cell directly beneath the feet; it's only
+			// free of the player's bounding box mid-jump. The block attaches to
+			// whatever solid face is adjacent — the block below (top face) or a
+			// horizontal neighbour (side face), which covers jagged shafts.
+			BlockPos target = BlockPos.containing(p.getX(), p.getY() - 1, p.getZ());
+			var tgtState = mc.level.getBlockState(target);
+			if (!(tgtState.isAir() || tgtState.canBeReplaced())) {
+				// below-feet is solid (standing on a ledge / shallow spot):
+				// climb by filling the feet cell itself
+				target = BlockPos.containing(p.getX(), p.getY(), p.getZ());
+				tgtState = mc.level.getBlockState(target);
+			}
+			boolean placed = false;
+			if (tgtState.isAir() || tgtState.canBeReplaced()) {
+				if (p.getY() < target.getY() + 1 - 0.001) {
+					lastWhy = "waiting apex y=" + String.format("%.2f", p.getY())
+							+ " need>" + (target.getY() + 1);
+				} else {
+				BlockHitResult hit = null;
+				BlockPos support = target.below();
+				if (!mc.level.getBlockState(support).getCollisionShape(mc.level, support).isEmpty()) {
+					hit = new BlockHitResult(Vec3.atCenterOf(support).add(0, 0.5, 0),
+							Direction.UP, support, false);
+				} else {
+					for (Direction dir : Direction.Plane.HORIZONTAL) {
+						BlockPos nb = target.relative(dir);
+						if (!mc.level.getBlockState(nb).getCollisionShape(mc.level, nb).isEmpty()) {
+							Direction face = dir.getOpposite();
+							hit = new BlockHitResult(Vec3.atCenterOf(nb).add(
+									face.getStepX() * 0.5, face.getStepY() * 0.5,
+									face.getStepZ() * 0.5), face, nb, false);
+							break;
+						}
+					}
+				}
+				if (hit == null) {
+					lastWhy = "no face near " + target;
+				} else if (hit.getLocation().distanceTo(p.getEyePosition())
+						> p.blockInteractionRange() + 1) {
+					lastWhy = "hit too far";
+				} else {
+					var res = mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND, hit);
+					p.swing(InteractionHand.MAIN_HAND);
+					lastRes = res + "@" + target;
+					placeCalls++;
+					placed = true;
+				}
+				}
+			} else {
+				lastWhy = "target solid " + tgtState.getBlock();
+			}
+			// hold jump unconditionally — wedged players may never report
+			// on_ground, and held jump re-fires on each landing anyway
+			input.set(0f, 0f, true, false, false);
 			noProgress = placed ? 0 : noProgress + 1;
-			if (noProgress > 80) { clearInput(); fail("can't place"); return true; }
+			if (noProgress > (int) (4 * tps())) { clearInput();
+				fail("can't place: " + lastWhy + " | calls=" + placeCalls + " res=" + lastRes);
+				return true; }
 			return false;
 		}
 		private void clearInput() {
-			McRemoteHolder.actions().input().set(0f, 0f, false, false, false);
+			var in = McRemoteHolder.actions().input();
+			in.set(0f, 0f, false, false, false);
+			in.attack = false;
 		}
 		@Override void succeed() { clearInput(); super.succeed(); }
 		@Override void fail(String e) { clearInput(); super.fail(e); }
@@ -539,7 +606,7 @@ public final class Actions {
 			input = (r.has("input") ? r.get("input").getAsString() : "").toLowerCase();
 			fuel = (r.has("fuel") ? r.get("fuel").getAsString() : "").toLowerCase();
 			wantCount = getI(r, "count", 64);
-			ticksLeft = (int) (getD(r, "seconds", 240) * 20);
+			ticksLeft = secs(r, "seconds", 240);
 		}
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
@@ -723,7 +790,7 @@ public final class Actions {
 		private int ticksLeft;
 		Wait(long id, JsonObject r) {
 			super(id, "wait");
-			ticksLeft = Math.max(1, (int) (getD(r, "seconds", 1) * 20));
+			ticksLeft = Math.max(1, secs(r, "seconds", 1));
 		}
 		@Override protected boolean tick(Minecraft mc) {
 			return --ticksLeft <= 0;
