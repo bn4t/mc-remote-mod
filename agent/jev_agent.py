@@ -19,6 +19,7 @@ Env vars:
 Usage: python3 jev_agent.py "Chop a bamboo block and pick it up"
 """
 import json
+import collections
 import math
 import os
 import sys
@@ -53,6 +54,10 @@ CRAFTABLES = [
     "stone_pickaxe", "stone_axe", "stone_shovel", "stone_sword", "furnace",
     "iron_pickaxe", "iron_axe", "iron_sword", "bucket", "torch", "chest",
     "ladder", "shield", "shears", "boat", "oak_boat", "campfire", "diamond_pickaxe",
+    "diamond_axe", "diamond_sword", "flint_and_steel", "bow", "arrow",
+    "iron_helmet", "iron_chestplate", "iron_leggings", "iron_boots",
+    "diamond_helmet", "diamond_chestplate", "diamond_leggings", "diamond_boots",
+    "white_bed", "fishing_rod",
 ]
 
 
@@ -103,6 +108,25 @@ def feasible_crafts(inv, table_open):
     add("oak_boat", True, (pl, 5))
     add("campfire", True, (st_, 3), (log, 3), (coal, 1))
     add("diamond_pickaxe", True, (dia, 3), (st_, 2))
+    add("diamond_axe", True, (dia, 3), (st_, 2))
+    add("diamond_sword", True, (dia, 2), (st_, 1))
+    flint = inv.get("flint", 0)
+    string = inv.get("string", 0)
+    feather = inv.get("feather", 0)
+    wool = n(lambda k: k.endswith("_wool"))
+    add("flint_and_steel", True, (iron, 1), (flint, 1))
+    add("bow", True, (st_, 3), (string, 3))
+    add("arrow", False, (flint, 1), (st_, 1), (feather, 1))
+    add("iron_helmet", True, (iron, 5))
+    add("iron_chestplate", True, (iron, 8))
+    add("iron_leggings", True, (iron, 7))
+    add("iron_boots", True, (iron, 4))
+    add("diamond_helmet", True, (dia, 5))
+    add("diamond_chestplate", True, (dia, 8))
+    add("diamond_leggings", True, (dia, 7))
+    add("diamond_boots", True, (dia, 4))
+    add("white_bed", True, (pl, 3), (wool, 3))
+    add("fishing_rod", True, (st_, 3), (string, 2))
     return [i for i in CRAFTABLES if i in ok]
 
 
@@ -412,13 +436,17 @@ def candidates(st, home=None):
             f"Mine the {n_below} under your feet ({bx},{by},{bz})." + warn,
             {"type": "mine", "x": bx, "y": by, "z": bz})
     if home:
-        hx, hy, hz = home
-        buried = not st.get("player", {}).get("sky_above", True)
-        if buried or dist2d(px, pz, hx, hz) > 60:
+        pl = st.get("player", {})
+        surf = pl.get("surface_y")
+        # genuinely buried = solid ground above: tree canopy alone doesn't count
+        buried = surf is not None and not pl.get("sky_above", True) \
+            and surf - py >= 3
+        if buried:
             out["return to surface"] = (
-                f"Pathfind back to the open surface at ({hx:.0f},{hy:.0f},{hz:.0f}) "
-                f"(you are at y={py:.0f}, {dist2d(px, pz, hx, hz):.0f} blocks away).",
-                {"type": "walk_to", "x": hx, "y": hy, "z": hz, "radius": 2.5})
+                f"Climb back to the open surface — dig/pillar up to "
+                f"y={surf + 1:.0f} (you are at y={py:.0f}).",
+                {"type": "walk_to", "x": px, "y": int(surf) + 1,
+                 "z": pz, "radius": 2.0})
 
     inv_list = st.get("inventory", {}).get("items", [])
     inv_counts2 = {}
@@ -557,6 +585,12 @@ def main():
         cands = {k: v for k, v in cands.items()
                  if not any(k == rf or (k.startswith(rf.split(" @")[0] + " @") and rf.startswith(k.split(" @")[0]))
                             for rf in recent_fails)} or cands
+        # also suppress anything already picked 4+ times in the last 8 —
+        # that loop is winning by repetition, not by progress
+        recent_picks = collections.Counter(
+            h["act"] for h in history[-8:] if h.get("act"))
+        cands = {k: v for k, v in cands.items()
+                 if recent_picks[k] < 4} or cands
         # a select changes nothing but the held slot — don't allow two in a row,
         # and never offer re-selecting the item already held (JEV ping-pong fix)
         if history and history[-1].get("act", "").startswith("select "):

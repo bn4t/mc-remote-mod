@@ -485,18 +485,21 @@ public final class Actions {
 			if (p == null) { fail("not in world"); return true; }
 			if (--ticksLeft <= 0) { fail("timeout"); return true; }
 			if (!(p.getMainHandItem().getItem() instanceof BlockItem)) {
-				fail("hold a placeable block"); return true;
+				fail(started ? "out of blocks" : "hold a placeable block");
+				return true;
 			}
 			if (!started) { started = true; startY = p.getY(); }
 			if (p.getY() - startY >= want) { clearInput(); return true; }
 			p.setXRot(85f);
-			BlockPos feet = BlockPos.containing(p.getX(), p.getY(), p.getZ());
-			var feetState = mc.level.getBlockState(feet);
-			BlockPos support = feet.below();
+			// place into the cell directly beneath the feet; it's only
+			// free of the player's bounding box mid-jump
+			BlockPos target = BlockPos.containing(p.getX(), p.getY() - 1, p.getZ());
+			var tgtState = mc.level.getBlockState(target);
+			BlockPos support = target.below();
 			var supState = mc.level.getBlockState(support);
 			var input = McRemoteHolder.actions().input();
 			boolean placed = false;
-			if ((feetState.isAir() || feetState.canBeReplaced())
+			if ((tgtState.isAir() || tgtState.canBeReplaced())
 					&& !supState.getCollisionShape(mc.level, support).isEmpty()) {
 				Vec3 hit = Vec3.atCenterOf(support).add(0, 0.5, 0);
 				if (hit.distanceTo(p.getEyePosition()) <= p.blockInteractionRange() + 1) {
