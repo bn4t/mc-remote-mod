@@ -228,6 +228,28 @@ NEEDS_PICKAXE = ("stone", "deepslate", "andesite", "granite", "diorite",
                  "sandstone", "calcite", "iron_block", "gold_block", "diamond_block")
 
 
+FOOD_ITEMS = {"cooked_beef", "cooked_porkchop", "cooked_chicken",
+              "cooked_mutton", "bread", "apple", "golden_apple", "carrot",
+              "baked_potato", "beetroot", "melon_slice", "sweet_berries",
+              "glow_berries", "dried_kelp", "cookie", "pumpkin_pie",
+              "mushroom_stew", "rabbit_stew", "cooked_cod", "cooked_salmon",
+              "cooked_rabbit", "honey_bottle", "rotten_flesh", "beetroot_soup"}
+SMELTABLES = {"raw_iron", "raw_copper", "raw_gold", "iron_ore",
+              "copper_ore", "gold_ore", "deepslate_iron_ore",
+              "deepslate_copper_ore", "deepslate_gold_ore", "cobblestone",
+              "sand", "red_sand", "clay_ball", "netherrack", "potato",
+              "raw_beef", "porkchop", "raw_chicken", "raw_mutton",
+              "raw_rabbit", "cod", "salmon", "kelp", "oak_log",
+              "spruce_log", "birch_log", "chorus_fruit", "cactus"}
+FUELS_PREFERRED = ("coal", "charcoal", "coal_block", "blaze_rod",
+                   "dried_kelp_block", "oak_log", "spruce_log", "birch_log",
+                   "oak_planks", "spruce_planks", "birch_planks")
+APPROACH_ENTITIES = {"blaze", "enderman", "piglin", "cow", "pig", "sheep",
+                     "chicken", "rabbit", "villager", "iron_golem",
+                     "wither_skeleton", "magma_cube", "zombified_piglin",
+                     "hoglin", "eye_of_ender"}
+
+
 def candidates(st, home=None):
     """Generate candidate actions from live state -> {key: (desc, payload)}."""
     px, py, pz = pos_of(st)
@@ -263,7 +285,8 @@ def candidates(st, home=None):
         if len(out) > 15:
             break
 
-    for e in sorted(st.get("entities", []) or [], key=lambda e: e.get("distance", 99))[:4]:
+    approach_n = 0
+    for e in sorted(st.get("entities", []) or [], key=lambda e: e.get("distance", 99))[:6]:
         et = base_name(e.get("type", ""))
         ex, ey, ez = round(e["x"]), round(e["y"]), round(e["z"])
         d = e.get("distance", 99)
@@ -273,10 +296,21 @@ def candidates(st, home=None):
                 f"Walk to the dropped {what} at ({ex},{ez}), {d:.0f} blocks away.",
                 {"type": "walk_to", "x": ex, "z": ez, "radius": 0.8,
                  "_pickup": what, "_ey": ey})
+        elif et == "eye_of_ender":
+            # eyes fly toward the stronghold — follow it
+            out["follow eye of ender"] = (
+                f"Walk toward the thrown eye of ender at ({ex},{ez}), "
+                f"{d:.0f} blocks away — it points to the stronghold.",
+                {"type": "walk_to", "x": ex, "z": ez, "radius": 2})
         elif d <= 4.5:
             out[f"attack {et}"] = (
                 f"Attack the {et} ({d:.0f} blocks away).",
                 {"type": "attack", "entity": e.get("id")})
+        elif et in APPROACH_ENTITIES and d <= 45 and approach_n < 3:
+            out[f"goto {et}"] = (
+                f"Walk toward the {et} at ({ex},{ez}), {d:.0f} blocks away.",
+                {"type": "walk_to", "x": ex, "z": ez})
+            approach_n += 1
 
     # interactable blocks in reach (use_on_block aims automatically);
     # suppressed while a container is already open to avoid open/close thrash
@@ -355,6 +389,78 @@ def candidates(st, home=None):
                 f"Pathfind back to the open surface at ({hx:.0f},{hy:.0f},{hz:.0f}) "
                 f"(you are at y={py:.0f}, {dist2d(px, pz, hx, hz):.0f} blocks away).",
                 {"type": "walk_to", "x": hx, "y": hy, "z": hz, "radius": 2.5})
+
+    inv_list = st.get("inventory", {}).get("items", [])
+    inv_counts2 = {}
+    for i in inv_list:
+        bn = base_name(i.get("id", ""))
+        inv_counts2[bn] = inv_counts2.get(bn, 0) + i.get("count", 1)
+
+    # eat: select a food item in the hotbar then use (hold right-click)
+    food_level = st.get("player", {}).get("food", 20)
+    if food_level < 18 and not st.get("open_container"):
+        for it in inv_list:
+            n = base_name(it.get("id", ""))
+            if n in FOOD_ITEMS and 0 <= it.get("slot", -1) <= 8:
+                out[f"eat {n}"] = (
+                    f"Select and eat the {n} (hunger at {food_level}/20).",
+                    {"_macro": [{"type": "select_slot", "slot": it["slot"]},
+                                {"type": "use", "seconds": 2.2}]})
+                break
+
+    # throwables: ender pearl teleport, eye of ender stronghold-finding
+    for n, label in (("ender_pearl", "ender pearl"), ("eye_of_ender", "eye of ender")):
+        for it in inv_list:
+            if base_name(it.get("id", "")) == n and 0 <= it.get("slot", -1) <= 8:
+                out[f"throw {label}"] = (
+                    f"Select and throw the {label}.",
+                    {"_macro": [{"type": "select_slot", "slot": it["slot"]},
+                                {"type": "use", "seconds": 0.5}]})
+                break
+
+    # tower up out of holes when carrying placeable blocks
+    if not st.get("player", {}).get("sky_above", True):
+        for it in inv_list:
+            n = base_name(it.get("id", ""))
+            if 0 <= it.get("slot", -1) <= 8 and any(k in n for k in
+                    ("dirt", "cobblestone", "planks", "stone", "netherrack",
+                     "sand", "gravel", "deepslate", "andesite", "diorite",
+                     "granite", "tuff", "basalt", "blackstone")):
+                out[f"tower up with {n}"] = (
+                    f"Select {n} and jump-place it under you to pillar "
+                    f"up toward the surface (you are at y={py:.0f}, "
+                    f"surface ~y={st.get('player', {}).get('surface_y', '?')}).",
+                    {"_macro": [{"type": "select_slot", "slot": it["slot"]},
+                                {"type": "pillar", "blocks": 8, "seconds": 40}]})
+                break
+
+    # smelt: furnace nearby + smeltable input + fuel in inventory
+    if not st.get("open_container"):
+        furn = next((b for b in notable[:30]
+                     if any(k in base_name(b["block"]) for k in
+                            ("furnace", "smoker"))), None)
+        if furn:
+            fd = math.dist((px, py, pz), (furn["x"] + 0.5, furn["y"] + 0.5, furn["z"] + 0.5))
+            fuel = next((f for f in FUELS_PREFERRED if inv_counts2.get(f)), None)
+            smelt_in = next((s for s in SMELTABLES if inv_counts2.get(s)), None)
+            if fuel and smelt_in:
+                out[f"smelt {smelt_in}"] = (
+                    f"Smelt {inv_counts2[smelt_in]}x {smelt_in} in the {base_name(furn['block'])} "
+                    f"at ({furn['x']},{furn['y']},{furn['z']}) using {fuel} as fuel "
+                    f"({fd:.0f} blocks away).",
+                    {"type": "smelt", "x": furn["x"], "y": furn["y"],
+                     "z": furn["z"], "input": smelt_in, "fuel": fuel})
+
+    # portal: step in and wait for the teleport
+    portal = next((b for b in notable[:30]
+                   if "portal" in base_name(b["block"])), None)
+    if portal:
+        out["enter portal"] = (
+            f"Walk into the portal at ({portal['x']},{portal['z']}) "
+            f"and wait for the teleport.",
+            {"_macro": [{"type": "walk_to", "x": portal["x"],
+                         "z": portal["z"], "radius": 0.5},
+                        {"type": "wait", "seconds": 8}]})
 
     for it in st.get("inventory", {}).get("items", []):
         n = base_name(it.get("id", ""))
@@ -479,14 +585,18 @@ def main():
             inv0 = api("/v1/state").get("inventory", {}).get("items", [])
             before_ct = sum(i.get("count", 1) for i in inv0
                             if base_name(i.get("id", "")) == payload["_pickup"])
-        res = action(payload, wait=25)
-        # if still queued/running (queue busy), poll to a terminal state
-        aid = res.get("action_id") or res.get("id")
-        for _ in range(30):
-            if res.get("status") not in ("queued", "running"):
+        # a macro expands one JEV pick into a sequence of mod actions
+        steps = payload.get("_macro") or [payload]
+        for sub in steps:
+            res = action(sub, wait=25)
+            aid = res.get("action_id") or res.get("id")
+            for _ in range(30):
+                if res.get("status") not in ("queued", "running"):
+                    break
+                time.sleep(1)
+                res = api("/v1/action?id=" + str(aid))
+            if res.get("status") in ("failed", "cancelled"):
                 break
-            time.sleep(1)
-            res = api("/v1/action?id=" + str(aid))
         if before_ct is not None and res.get("status") == "done":
             inv1 = api("/v1/state").get("inventory", {}).get("items", [])
             after_ct = sum(i.get("count", 1) for i in inv1

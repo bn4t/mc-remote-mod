@@ -117,7 +117,37 @@ public class StateCollector {
 			effects.add(eff);
 		}
 		o.add("effects", effects);
+		ItemStack off = p.getOffhandItem();
+		if (!off.isEmpty()) o.add("offhand", item(off, -1));
+		o.add("boss_bars", bossBars(mc));
 		return o;
+	}
+
+	private static java.lang.reflect.Field bossEventsField;
+	private static boolean bossFieldTried;
+
+	private static JsonArray bossBars(Minecraft mc) {
+		JsonArray arr = new JsonArray();
+		try {
+			if (!bossFieldTried) {
+				bossFieldTried = true;
+				bossEventsField = net.minecraft.client.gui.components.BossHealthOverlay.class
+						.getDeclaredField("events");
+				bossEventsField.setAccessible(true);
+			}
+			if (bossEventsField == null) return arr;
+			Object overlay = mc.gui.hud.getBossOverlay();
+			java.util.Map<?, ?> events =
+					(java.util.Map<?, ?>) bossEventsField.get(overlay);
+			for (Object ev : events.values()) {
+				net.minecraft.world.BossEvent be = (net.minecraft.world.BossEvent) ev;
+				JsonObject b = new JsonObject();
+				b.addProperty("name", be.getName().getString());
+				b.addProperty("progress", be.getProgress());
+				arr.add(b);
+			}
+		} catch (Throwable ignored) {}
+		return arr;
 	}
 
 	private JsonObject world(Minecraft mc) {

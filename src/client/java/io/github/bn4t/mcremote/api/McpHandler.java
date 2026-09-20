@@ -225,7 +225,7 @@ public class McpHandler {
 			case "look", "move", "jump", "attack", "use", "interact_entity", "mine",
 					"use_on_block", "walk_to", "select_slot", "drop", "say",
 					"respawn", "close_screen", "click_slot", "wait", "swap_hands",
-					"craft", "open_inventory" -> tool;
+					"craft", "open_inventory", "smelt", "pillar" -> tool;
 			default -> tool; // unknown -> server returns error
 		};
 	}
@@ -323,6 +323,14 @@ public class McpHandler {
 				prop("all", "boolean", "place all matching ingredients to craft the max (default true)"))));
 
 		tools.add(tool("open_inventory", "Open the player inventory screen (2x2 crafting grid + recipe book).", schema()));
+		tools.add(tool("smelt", "Open the furnace-family block at x,y,z, deposit `input` items and `fuel` from the inventory, wait, collect smelted output, close. Works on furnace/blast_furnace/smoker.", schema(
+				req("x", "integer"), req("y", "integer"), req("z", "integer"),
+				req("input", "string"), req("fuel", "string"),
+				prop("count", "integer", "items to smelt (default all deposited)"),
+				prop("seconds", "number", "timeout, default 240"))));
+		tools.add(tool("pillar", "Tower up: hold jump and place the held block under the feet each hop. Hold a placeable block first (select_slot).", schema(
+				prop("blocks", "integer", "how many blocks to climb, default 3"),
+				prop("seconds", "number", "timeout, default 20"))));
 
 		tools.add(tool("close_screen", "Close any open screen/container.", schema()));
 		tools.add(tool("say", "Send a chat message.", schema(req("message", "string"))));

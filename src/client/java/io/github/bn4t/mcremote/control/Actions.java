@@ -17,7 +17,9 @@ import net.minecraft.world.item.crafting.display.RecipeDisplayEntry;
 import net.minecraft.world.item.crafting.display.SlotDisplayContext;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.inventory.AbstractCraftingMenu;
+import net.minecraft.world.inventory.AbstractFurnaceMenu;
 import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -45,6 +47,8 @@ public final class Actions {
 			case "close_screen" -> new CloseScreen(id);
 			case "click_slot" -> new ClickSlot(id, req);
 			case "craft" -> new Craft(id, req);
+			case "smelt" -> new Smelt(id, req);
+			case "pillar" -> new Pillar(id, req);
 			case "open_inventory" -> new OpenInventory(id);
 			case "wait" -> new Wait(id, req);
 			default -> null;
@@ -66,6 +70,11 @@ public final class Actions {
 	private static LocalPlayer requirePlayer(Minecraft mc) {
 		if (mc.player == null || mc.level == null) return null;
 		return mc.player;
+	}
+
+	static boolean nameMatches(String id, String want) {
+		String base = id.contains(":") ? id.substring(id.indexOf(':') + 1) : id;
+		return base.equals(want) || id.equals(want);
 	}
 
 	// --- actions ---
@@ -456,6 +465,149 @@ public final class Actions {
 		}
 	}
 
+	/**
+	 * Towers up: holds jump and places the held block into the feet cell on
+	 * each hop. Used for pit escapes and climbing. Params: blocks (count),
+	 * seconds (timeout).
+	 */
+	static class Pillar extends GameAction {
+		private final int want;
+		private int ticksLeft, noProgress;
+		private double startY;
+		private boolean started;
+		Pillar(long id, JsonObject r) {
+			super(id, "pillar");
+			want = getI(r, "blocks", 3);
+			ticksLeft = (int) (getD(r, "seconds", 20) * 20);
+		}
+		@Override protected boolean tick(Minecraft mc) {
+			LocalPlayer p = requirePlayer(mc);
+			if (p == null) { fail("not in world"); return true; }
+			if (--ticksLeft <= 0) { fail("timeout"); return true; }
+			if (!(p.getMainHandItem().getItem() instanceof BlockItem)) {
+				fail("hold a placeable block"); return true;
+			}
+			if (!started) { started = true; startY = p.getY(); }
+			if (p.getY() - startY >= want) { clearInput(); return true; }
+			p.setXRot(85f);
+			BlockPos feet = BlockPos.containing(p.getX(), p.getY(), p.getZ());
+			var feetState = mc.level.getBlockState(feet);
+			BlockPos support = feet.below();
+			var supState = mc.level.getBlockState(support);
+			var input = McRemoteHolder.actions().input();
+			boolean placed = false;
+			if ((feetState.isAir() || feetState.canBeReplaced())
+					&& !supState.getCollisionShape(mc.level, support).isEmpty()) {
+				Vec3 hit = Vec3.atCenterOf(support).add(0, 0.5, 0);
+				if (hit.distanceTo(p.getEyePosition()) <= p.blockInteractionRange() + 1) {
+					mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND,
+							new BlockHitResult(hit, Direction.UP, support, false));
+					p.swing(InteractionHand.MAIN_HAND);
+					placed = true;
+				}
+			}
+			input.set(0f, 0f, p.onGround(), false, false);
+			noProgress = placed ? 0 : noProgress + 1;
+			if (noProgress > 80) { clearInput(); fail("can't place"); return true; }
+			return false;
+		}
+		private void clearInput() {
+			McRemoteHolder.actions().input().set(0f, 0f, false, false, false);
+		}
+		@Override void succeed() { clearInput(); super.succeed(); }
+		@Override void fail(String e) { clearInput(); super.fail(e); }
+	}
+
+	/**
+	 * Opens a furnace-family block, deposits `input` items and `fuel`, waits
+	 * for smelted output, collects it, closes the screen.
+	 * Params: x,y,z (furnace), input (item name), fuel (item name),
+	 *         count (default = all deposited), seconds (timeout).
+	 */
+	static class Smelt extends GameAction {
+		private final BlockPos pos;
+		private final String input, fuel;
+		private final int wantCount;
+		private int ticksLeft, collected, target = -1, openWait;
+		private boolean openSent, deposited;
+		Smelt(long id, JsonObject r) {
+			super(id, "smelt");
+			pos = new BlockPos(getI(r, "x", 0), getI(r, "y", 0), getI(r, "z", 0));
+			input = (r.has("input") ? r.get("input").getAsString() : "").toLowerCase();
+			fuel = (r.has("fuel") ? r.get("fuel").getAsString() : "").toLowerCase();
+			wantCount = getI(r, "count", 64);
+			ticksLeft = (int) (getD(r, "seconds", 240) * 20);
+		}
+		@Override protected boolean tick(Minecraft mc) {
+			LocalPlayer p = requirePlayer(mc);
+			if (p == null) { fail("not in world"); return true; }
+			if (--ticksLeft <= 0) { close(mc); fail("timeout"); return true; }
+			if (!(p.containerMenu instanceof AbstractFurnaceMenu fm)) {
+				if (!openSent) {
+					Vec3 eye = p.getEyePosition();
+					if (Vec3.atCenterOf(pos).distanceTo(eye) > p.blockInteractionRange() + 1) {
+						fail("furnace out of reach"); return true;
+					}
+					Vec3 hit = Vec3.atCenterOf(pos);
+					mc.gameMode.useItemOn(p, InteractionHand.MAIN_HAND,
+							new BlockHitResult(hit, Direction.UP, pos, false));
+					openSent = true;
+					return false;
+				}
+				if (++openWait > 30) { fail("furnace did not open"); return true; }
+				return false;
+			}
+			if (!deposited) {
+				deposited = true;
+				int moved = 0;
+				// input items route to the ingredient slot on quick-move
+				for (int i = AbstractFurnaceMenu.SLOT_COUNT; i < fm.slots.size(); i++) {
+					ItemStack s = fm.slots.get(i).getItem();
+					if (!s.isEmpty()
+							&& nameMatches(BuiltInRegistries.ITEM.getKey(s.getItem()).toString(), input)
+							&& moved < wantCount) {
+						moved += s.getCount();
+						mc.gameMode.handleContainerInput(fm.containerId, i, 0,
+								ContainerInput.QUICK_MOVE, p);
+					}
+				}
+				target = Math.min(wantCount, moved);
+				if (target <= 0) { close(mc); fail("no " + input + " in inventory"); return true; }
+				// fuel may also be smeltable (logs) — place onto the fuel slot
+				// explicitly instead of quick-moving
+				int needFuel = Math.min(8, target / 8 + 1);
+				for (int i = AbstractFurnaceMenu.SLOT_COUNT; i < fm.slots.size()
+						&& needFuel > 0; i++) {
+					ItemStack s = fm.slots.get(i).getItem();
+					if (!s.isEmpty()
+							&& nameMatches(BuiltInRegistries.ITEM.getKey(s.getItem()).toString(), fuel)) {
+						int n = Math.min(s.getCount(), needFuel);
+						mc.gameMode.handleContainerInput(fm.containerId, i, 0,
+								ContainerInput.PICKUP, p);
+						mc.gameMode.handleContainerInput(fm.containerId,
+								AbstractFurnaceMenu.FUEL_SLOT, n < s.getCount() ? 1 : 0,
+								ContainerInput.PICKUP, p);
+						// return leftovers to their slot
+						mc.gameMode.handleContainerInput(fm.containerId, i, 0,
+								ContainerInput.PICKUP, p);
+						needFuel -= n;
+					}
+				}
+				return false;
+			}
+			ItemStack out = fm.getSlot(AbstractFurnaceMenu.RESULT_SLOT).getItem();
+			if (!out.isEmpty()) {
+				collected += out.getCount();
+				mc.gameMode.handleContainerInput(fm.containerId,
+						AbstractFurnaceMenu.RESULT_SLOT, 0, ContainerInput.QUICK_MOVE, p);
+			}
+			if (collected >= target) { close(mc); return true; }
+			return false;
+		}
+		private void close(Minecraft mc) { mc.gui.setScreen(null); }
+		@Override void fail(String e) { close(Minecraft.getInstance()); super.fail(e); }
+	}
+
 	/** Opens the player inventory screen (shows the 2x2 grid + recipe book). */
 	static class OpenInventory extends GameAction {
 		OpenInventory(long id) { super(id, "open_inventory"); }
@@ -496,10 +648,7 @@ public final class Actions {
 			}
 			return n;
 		}
-		private static boolean nameMatches(String id, String want) {
-			String base = id.contains(":") ? id.substring(id.indexOf(':') + 1) : id;
-			return base.equals(want) || id.equals(want);
-		}
+
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
 			if (p == null) { fail("not in world"); return true; }
