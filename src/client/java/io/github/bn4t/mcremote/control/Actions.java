@@ -40,6 +40,7 @@ public final class Actions {
 			case "use_on_block" -> new UseOnBlock(id, req);
 			case "walk_to" -> new WalkTo(id, req);
 			case "select_slot" -> new SelectSlot(id, req);
+			case "select_item" -> new SelectItem(id, req);
 			case "drop" -> new Drop(id, req);
 			case "swap_hands" -> new KeyPress(id, o -> o.keySwapOffhand);
 			case "say" -> new Say(id, req);
@@ -88,6 +89,10 @@ public final class Actions {
 		return base.equals(want) || id.equals(want);
 	}
 
+	private static void clearMove(Minecraft mc) {
+		McRemoteHolder.actions().input().set(0f, 0f, false, false, false);
+	}
+
 	// --- actions ---
 
 	static class Look extends GameAction {
@@ -112,14 +117,36 @@ public final class Actions {
 		private final boolean sprint, sneak, jump;
 		private final Float yaw, pitch;
 		private int ticksLeft;
+		private double sx, sz;
+		private final double tx, tz;
+		private boolean hasTarget;
+		private boolean moved;
 		Move(long id, JsonObject r) {
 			super(id, "move");
-			forward = (float) getD(r, "forward", 0);
-			strafe = (float) getD(r, "strafe", 0);
+			float f = (float) getD(r, "forward", 0);
+			float st = (float) getD(r, "strafe", 0);
+			Float y = r.has("yaw") ? (float) getD(r, "yaw", 0) : null;
+			// "bearing" compass label = face that direction + walk forward
+			if (r.has("bearing")) {
+				y = switch (r.get("bearing").getAsString()
+						.toUpperCase()) {
+					case "N" -> 180f; case "NE" -> -135f;
+					case "E" -> -90f; case "SE" -> -45f;
+					case "S" -> 0f; case "SW" -> 45f;
+					case "W" -> 90f; case "NW" -> 135f;
+					default -> y;
+				};
+				if (f == 0 && st == 0) f = 1;
+			}
+			forward = f;
+			strafe = st;
+			yaw = y;
 			sprint = getB(r, "sprint", false);
 			sneak = getB(r, "sneak", false);
 			jump = getB(r, "jump", false);
-			yaw = r.has("yaw") ? (float) getD(r, "yaw", 0) : null;
+			tx = r.has("tx") ? getD(r, "tx", 0) : 0;
+			tz = r.has("tz") ? getD(r, "tz", 0) : 0;
+			hasTarget = r.has("tx") && r.has("tz");
 			pitch = r.has("pitch") ? (float) getD(r, "pitch", 0) : null;
 			double seconds = getD(r, "seconds", 0);
 			ticksLeft = seconds <= 0 ? Integer.MAX_VALUE : secs(r, "seconds", 0);
@@ -127,11 +154,29 @@ public final class Actions {
 		@Override protected boolean tick(Minecraft mc) {
 			LocalPlayer p = requirePlayer(mc);
 			if (p == null) { fail("not in world"); return true; }
+			if (ticksLeft == Integer.MAX_VALUE - 1 || sx == 0 && sz == 0) {
+				sx = p.getX(); sz = p.getZ();
+			}
 			if (yaw != null) { p.setYRot(yaw); p.setYHeadRot(yaw); }
 			if (pitch != null) p.setXRot(pitch);
 			RemoteInput in = McRemoteHolder.actions().input();
 			in.set(forward, strafe, jump, sneak, sprint);
-			return --ticksLeft <= 0;
+			// wall-jitter drifts a fraction of a block — only real travel counts
+			if (Math.abs(p.getX() - sx) + Math.abs(p.getZ() - sz) > 0.5) moved = true;
+			// optional arrival target: stop within ~2 blocks of (tx,tz)
+			if (hasTarget && Math.hypot(p.getX() - tx, p.getZ() - tz) < 2.0) {
+				return true;
+			}
+			if (--ticksLeft <= 0) {
+				// walked the whole duration without displacing — the agent
+				// must know it's walled in, not that it travelled
+				if (!moved && (forward != 0 || strafe != 0)) {
+					fail("blocked — moved 0 blocks; walled in, "
+							+ "mine through or tower up");
+				}
+				return true;
+			}
+			return false;
 		}
 	}
 
@@ -159,7 +204,8 @@ public final class Actions {
 		private int done, ticksLeft;
 		Attack(long id, JsonObject r) {
 			super(id, "attack");
-			entityId = r.has("entity_id") ? getI(r, "entity_id", -1) : null;
+			entityId = r.has("entity_id") ? getI(r, "entity_id", -1)
+					: (r.has("entity") ? getI(r, "entity", -1) : null);
 			times = Math.max(1, getI(r, "times", 1));
 			ticksLeft = secs(r, "seconds", 10);
 		}
@@ -173,12 +219,18 @@ public final class Actions {
 				return ++done >= times;
 			}
 			Entity e = mc.level.getEntity(entityId);
-			if (e == null || !e.isAlive()) { fail("entity gone"); return true; }
-			if (!e.isPickable() || p.distanceTo(e) > p.entityInteractionRange() + 1) {
-				fail("entity out of reach"); return true;
-			}
+			if (e == null || !e.isAlive()) { clearMove(mc); return true; }
 			float[] yp = aimAt(p.getEyePosition(), e.getEyePosition());
 			p.setYRot(yp[0]); p.setXRot(yp[1]); p.setYHeadRot(yp[0]);
+			double reach = p.entityInteractionRange() + 0.5;
+			// no movement: attack only aims + swings. If out of reach, fail
+			// so the caller picks a movement action to close the distance
+			if (p.distanceTo(e) > reach) {
+				fail("out of reach ("
+						+ String.format("%.1f", p.distanceTo(e))
+						+ " blocks) — move closer first");
+				return true;
+			}
 			if (p.getAttackStrengthScale(0f) >= 1f) {
 				mc.gameMode.attack(p, e);
 				p.swing(InteractionHand.MAIN_HAND);
@@ -239,6 +291,14 @@ public final class Actions {
 			if (dist > p.blockInteractionRange() + 1) {
 				fail("block out of reach (" + String.format("%.1f", dist) + ")"); return true;
 			}
+			var bstate = mc.level.getBlockState(pos);
+			autoTool(mc, p, bstate);
+			if (bstate.requiresCorrectToolForDrops()
+					&& !p.getInventory().getSelectedItem().isCorrectToolForDrops(bstate)) {
+				fail("can't harvest " + BuiltInRegistries.BLOCK.getKey(bstate.getBlock()).getPath()
+						+ " with held tool — it drops nothing; need a pickaxe or better");
+				return true;
+			}
 			float[] yp = aimAt(p.getEyePosition(), Vec3.atCenterOf(pos));
 			p.setYRot(yp[0]); p.setXRot(yp[1]); p.setYHeadRot(yp[0]);
 			McRemoteHolder.actions().input().attack = true;
@@ -252,6 +312,50 @@ public final class Actions {
 			McRemoteHolder.actions().input().attack = false;
 			super.fail(error);
 		}
+	}
+
+	/** Equips the fastest tool in the whole inventory for a block: selects it
+	 * if already in the hotbar, else swap-clicks it from the backpack into the
+	 * selected hotbar slot via the inventory menu (no screen needed). */
+	private static void autoTool(Minecraft mc, LocalPlayer p, net.minecraft.world.level.block.state.BlockState state) {
+		var inv = p.getInventory();
+		float held = inv.getSelectedItem().getDestroySpeed(state);
+		int best = -1;
+		float bestSpeed = held;
+		for (int i = 0; i < inv.getContainerSize(); i++) {
+			float s = inv.getItem(i).getDestroySpeed(state);
+			if (s > bestSpeed) { bestSpeed = s; best = i; }
+		}
+		if (best < 0) return;
+		if (best <= 8) {
+			inv.setSelectedSlot(best);
+		} else {
+			int hb = inv.getSelectedSlot();
+			mc.gameMode.handleContainerInput(p.inventoryMenu.containerId,
+					best, hb, ContainerInput.SWAP, p);
+		}
+	}
+
+	/** True if held is a full-cube block; else equips the first one from inv. */
+	private static boolean ensurePillarBlock(Minecraft mc, LocalPlayer p) {
+		var inv = p.getInventory();
+		if (isFullBlockItem(mc, p, inv.getSelectedItem())) return true;
+		for (int i = 0; i < inv.getContainerSize(); i++) {
+			var st = inv.getItem(i);
+			if (!isFullBlockItem(mc, p, st)) continue;
+			if (i <= 8) inv.setSelectedSlot(i);
+			else mc.gameMode.handleContainerInput(
+					p.inventoryMenu.containerId, i,
+					inv.getSelectedSlot(), ContainerInput.SWAP, p);
+			return isFullBlockItem(mc, p, inv.getSelectedItem());
+		}
+		return false;
+	}
+
+	private static boolean isFullBlockItem(Minecraft mc, LocalPlayer p, net.minecraft.world.item.ItemStack st) {
+		if (!(st.getItem() instanceof BlockItem bi)) return false;
+		return bi.getBlock().defaultBlockState()
+				.isCollisionShapeFullBlock(mc.level, p.blockPosition());
 	}
 
 	static class UseOnBlock extends GameAction {
@@ -271,13 +375,31 @@ public final class Actions {
 			LocalPlayer p = requirePlayer(mc);
 			if (p == null) { fail("not in world"); return true; }
 			Vec3 eye = p.getEyePosition();
-			// Aim slightly off-center toward the requested face; the ray hits the
-			// face without grazing coplanar neighbours (which a face-centre aim
-			// does on flat ground).
-			Vec3 target = Vec3.atCenterOf(pos).add(face.getStepX() * 0.25, face.getStepY() * 0.25, face.getStepZ() * 0.25);
+			// Aim at the face closest to the player's eye — aiming at UP when
+			// the block is above the player makes the face unreachable.
+			Direction f = face;
+			if (face == Direction.UP && pos.getY() + 1 < eye.y - 0.5) {
+				double dx = eye.x - (pos.getX() + 0.5);
+				double dy = eye.y - (pos.getY() + 0.5);
+				double dz = eye.z - (pos.getZ() + 0.5);
+				double ax = Math.abs(dx), ay = Math.abs(dy), az = Math.abs(dz);
+				if (ay >= ax && ay >= az) f = dy < 0 ? Direction.UP : Direction.DOWN;
+				else if (ax >= az) f = dx < 0 ? Direction.WEST : Direction.EAST;
+				else f = dz < 0 ? Direction.NORTH : Direction.SOUTH;
+			}
+			// Aim slightly off-center toward the face; the ray hits it without
+			// grazing coplanar neighbours (which a face-centre aim does).
+			Vec3 target = Vec3.atCenterOf(pos).add(f.getStepX() * 0.25, f.getStepY() * 0.25, f.getStepZ() * 0.25);
 			float[] yp = aimAt(eye, target);
 			p.setYRot(yp[0]); p.setXRot(yp[1]); p.setYHeadRot(yp[0]);
-			HitResult hit = mc.level.clip(new ClipContext(eye, target, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, p));
+			HitResult hit = mc.level.clip(new ClipContext(eye, target,
+					ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, p));
+			if (!(hit instanceof BlockHitResult) || !((BlockHitResult) hit).getBlockPos().equals(pos)) {
+				// a non-solid occluder (leaves, grass) may intercept the ray —
+				// retry hitting the face ignoring shapes
+				hit = mc.level.clip(new ClipContext(eye, target,
+						ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, p));
+			}
 			if (!(hit instanceof BlockHitResult bh) || !bh.getBlockPos().equals(pos)) {
 				fail("block face not reachable"); return true;
 			}
@@ -389,6 +511,45 @@ public final class Actions {
 		}
 	}
 
+	/**
+	 * Equips a named item into the hand: selects it if already in the hotbar,
+	 * otherwise swap-clicks it from the backpack into a hotbar slot via the
+	 * (always-open) player inventory menu — no screen needed. Params: item
+	 * (name substring), hotbar (0-8, default = selected slot).
+	 */
+	static class SelectItem extends GameAction {
+		private final String want;
+		private final int hotbar;
+		SelectItem(long id, JsonObject r) {
+			super(id, "select_item");
+			want = (r.has("item") ? r.get("item").getAsString() : "").toLowerCase();
+			hotbar = getI(r, "hotbar", -1);
+		}
+		@Override protected boolean tick(Minecraft mc) {
+			LocalPlayer p = requirePlayer(mc);
+			if (p == null) { fail("not in world"); return true; }
+			var inv = p.getInventory();
+			for (int i = 0; i <= 8; i++) {           // already in hotbar
+				if (inv.getItem(i).getItem().toString().toLowerCase().contains(want)) {
+					inv.setSelectedSlot(i);
+					return true;
+				}
+			}
+			for (int i = 9; i < inv.getContainerSize(); i++) {  // backpack -> swap
+				if (inv.getItem(i).getItem().toString().toLowerCase().contains(want)) {
+					int hb = hotbar >= 0 ? hotbar : inv.getSelectedSlot();
+					mc.gameMode.handleContainerInput(
+							p.inventoryMenu.containerId, i, hb,
+							ContainerInput.SWAP, p);
+					inv.setSelectedSlot(hb);
+					return true;
+				}
+			}
+			fail("no item matching '" + want + "'");
+			return true;
+		}
+	}
+
 	static class Drop extends GameAction {
 		private final boolean all;
 		Drop(long id, JsonObject r) {
@@ -445,7 +606,12 @@ public final class Actions {
 	static class CloseScreen extends GameAction {
 		CloseScreen(long id) { super(id, "close_screen"); }
 		@Override protected boolean tick(Minecraft mc) {
+			// closeContainer() sends the close packet + resets containerMenu;
+			// gui.setScreen alone would orphan the container server-side
+			LocalPlayer p = requirePlayer(mc);
 			if (mc.gui.screen() != null) mc.gui.setScreen(null);
+			if (p != null && p.containerMenu != p.inventoryMenu)
+				p.closeContainer();
 			return true;
 		}
 	}
@@ -482,7 +648,7 @@ public final class Actions {
 	 */
 	static class Pillar extends GameAction {
 		private final int want;
-		private int ticksLeft, noProgress, placeCalls;
+		private int ticksLeft, noProgress, placeCalls, digTicks;
 		private String lastWhy = "?", lastRes = "?";
 		private double startY;
 		private boolean started;
@@ -495,11 +661,13 @@ public final class Actions {
 			LocalPlayer p = requirePlayer(mc);
 			if (p == null) { fail("not in world"); return true; }
 			if (--ticksLeft <= 0) { fail("timeout"); return true; }
-			if (!(p.getMainHandItem().getItem() instanceof BlockItem)) {
-				fail(started ? "out of blocks" : "hold a placeable block");
-				return true;
+			if (!started) {
+				if (!ensurePillarBlock(mc, p)) {
+					fail("hold a full block (dirt/cobble/planks) to tower up");
+					return true;
+				}
+				started = true; startY = p.getY();
 			}
-			if (!started) { started = true; startY = p.getY(); }
 			if (p.getY() - startY >= want) { clearInput(); return true; }
 			var input = McRemoteHolder.actions().input();
 			// clear headroom first: the cells the head occupies at jump apex.
@@ -509,14 +677,24 @@ public final class Actions {
 				BlockPos cell = BlockPos.containing(p.getX(), p.getY() + up, p.getZ());
 				var cs = mc.level.getBlockState(cell);
 				if (!cs.isAir() && !cs.getCollisionShape(mc.level, cell).isEmpty()) {
+					// dig the ceiling with the pickaxe, not bare hands — the
+					// placeable block held for towering makes stone unbreakable
+					autoTool(mc, p, cs);
 					float[] yp = aimAt(p.getEyePosition(), Vec3.atCenterOf(cell));
 					p.setYRot(yp[0]); p.setXRot(yp[1]); p.setYHeadRot(yp[0]);
 					input.attack = true;
 					input.set(0f, 0f, false, false, false);
-					noProgress++;
-					if (noProgress > (int) (10 * tps())) { input.attack = false; fail("can't clear headroom"); return true; }
+					digTicks++;
+					if (digTicks > (int) (15 * tps())) { input.attack = false; fail("can't clear headroom at " + cell); return true; }
 					return false;
 				}
+			}
+			// headroom clear — dig budget resets and the place phase starts fresh
+			if (digTicks > 0) { digTicks = 0; noProgress = 0; }
+			// the dig phase swapped the held slot to a tool — re-equip a block
+			if (!ensurePillarBlock(mc, p)) {
+				fail("out of blocks");
+				return true;
 			}
 			p.setXRot(85f);
 			// place into the cell directly beneath the feet; it's only
@@ -729,6 +907,23 @@ public final class Actions {
 						fail("current container is not a crafting menu (close_screen first)");
 						return true;
 					}
+					// clear leftovers: drain the result slot, then empty the grid
+					// back into the inventory — a stale recipe blocks placement
+					int res = cm.getResultSlot().index;
+					if (!menu.getSlot(res).getItem().isEmpty())
+						mc.gameMode.handleContainerInput(menu.containerId, res, 0,
+								ContainerInput.QUICK_MOVE, p);
+					for (int i = 1; i <= cm.getGridWidth() * cm.getGridHeight(); i++) {
+						if (!menu.getSlot(i).getItem().isEmpty())
+							mc.gameMode.handleContainerInput(menu.containerId, i, 0,
+									ContainerInput.QUICK_MOVE, p);
+					}
+					stage = -1; ticks = 0; break;
+				}
+				case -1 -> {
+					if (++ticks < 4) return false;
+					var menu = p.containerMenu;
+					AbstractCraftingMenu cm = (AbstractCraftingMenu) menu;
 					int grid = cm.getGridWidth() * cm.getGridHeight();
 					StackedItemContents sic = new StackedItemContents();
 					var inv = p.getInventory();

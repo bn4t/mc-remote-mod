@@ -101,6 +101,19 @@ public class ActionRunner {
 			return;
 		}
 
+		// auto-respawn: never sit on the death screen — remote control needs
+		// the player alive. A few ticks of delay lets the death animation
+		// play and gives the server time to register the death.
+		if (mc.player.isDeadOrDying() || mc.player.getHealth() <= 0) {
+			if (mc.player.deathTime >= 20) {
+				mc.player.respawn();
+				mc.gui.setScreen(null);
+				input.clear();
+			}
+			input.apply(mc);
+			return;
+		}
+
 		if (current == null) {
 			current = queue.poll();
 			if (current != null) current.markRunning();

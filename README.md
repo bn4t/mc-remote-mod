@@ -1,11 +1,28 @@
 # mc-remote-mod
 
-Client-side remote control for Minecraft Java Edition 26.2 (Fabric).
+**Remote-control Minecraft with an AI agent.** A Fabric client mod that exposes
+the client's view of the world — blocks, entities, inventory, screens — as a
+structured JSON/MCP API, plus actions to drive the player. On top of it sits
+`agent/jev_agent.py`: a stdlib-only agent that asks
+[JEV](https://openrouter.ai/typesafe/jev-1.13) (an OpenRouter *decision* model —
+it returns probability distributions over candidate actions, not chat) what to
+do next, and executes the argmax.
 
-The mod runs an HTTP JSON API and an MCP (streamable HTTP) endpoint inside the
-game client. An external agent — an LLM tool caller, a bot script, a Devin
-session — can observe exactly what the client received from the server (blocks,
-entities, player state, chat) and drive the player with real client inputs.
+![JEV playing Minecraft — punching a tree, placing a crafting table](docs/demo.gif)
+
+Each decision step: the agent snapshots live state, builds a small menu of
+candidate actions ("mine oak_log @…", "walk N toward gravel", "craft
+wooden_pickaxe", "tower up"), JEV scores every candidate, the argmax runs
+through the real client input path. No commands, no teleports, no `/give` —
+it's survival-mode gameplay, driven entirely by decisions.
+
+## What it can do
+
+From a fresh survival world, JEV has autonomously: located and punched trees,
+crafted planks/sticks/crafting tables/pickaxes, placed and used crafting
+tables, dug staircases and towered out of pits it fell into, navigated toward
+named targets, and recovered from deaths (auto-respawn). It plays at whatever
+tick rate you allow — `/tick rate 80` makes iteration ~4× real-time.
 
 ## Building
 
@@ -63,7 +80,8 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
              "health": ..., "food": ..., "xp_level": ..., "gamemode": ...,
              "on_ground": ..., "selected_slot": 0, "effects": [...],
              "surface_y": 70,     // heightmap top of the player's column
-             "sky_above": true},  // player at/above surface_y (roughly "outdoors")
+             "sky_above": true,   // player at/above surface_y (roughly "outdoors")
+             "terrain": {"dirs": {...}}},  // per-direction surface offsets (cliffs/walls)
   "world":  {"dimension": "minecraft:overworld", "day_time": ..., "biome": ...,
              "raining": false, "difficulty": "normal", "server": "singleplayer",
              "spawn": {"x":..,"y":..,"z":..}},
@@ -86,20 +104,25 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
 
 ```jsonc
 {"type":"look",   "yaw":90, "pitch":-10}        // yaw 0=S 90=W 180=N -90=E; pitch -90=up 90=down
-{"type":"move",   "forward":1,"strafe":0,"seconds":3,"sprint":true,"jump":false,"yaw":90}
+{"type":"move",   "forward":1,"strafe":0,"seconds":3,"sprint":true,"jump":false,
+                  "bearing":"N","tx":-635,"tz":744} // bearing = face that way + walk;
+                                     // tx/tz = stop within ~2 blocks of target
 {"type":"walk_to","x":-635,"z":744,"radius":1.5,"seconds":60} // A* pathfind then steer;
                                    // optional "y": target height; fails "stuck"/"timeout"
 {"type":"jump"}
 {"type":"attack", "entity_id":12,"times":3}     // or omit entity_id to swing at crosshair
 {"type":"use",    "seconds":0.35}               // hold right click (eat/place/interact)
 {"type":"interact_entity","entity_id":12}
-{"type":"mine",   "x":-650,"y":76,"z":746,"seconds":30}
+{"type":"mine",   "x":-650,"y":76,"z":746,"seconds":30}  // errors when the held
+                                   // tool can't harvest the block (no bare-hand stone)
 {"type":"use_on_block","x":-650,"y":76,"z":746,"face":"up"} // right-click that block face
 {"type":"select_slot","slot":0}
+{"type":"select_item","item":"crafting_table"}  // finds item in inv, swaps to hotbar
 {"type":"drop",   "all":false}
 {"type":"swap_hands"}
 {"type":"click_slot","slot":10,"button":0,"click":"pickup"} // pickup|quick_move|swap|throw|clone|pickup_all
 {"type":"craft", "item":"wooden_pickaxe","all":true} // recipe-book craft; uses the open 2x2/3x3 grid
+{"type":"smelt", "item":"iron_ingot","count":8}    // furnace: places fuel+input, waits, takes output
 {"type":"open_inventory"}                              // opens the inventory screen (2x2 craft grid)
 {"type":"close_screen"}
 {"type":"say",    "message":"hello"}
@@ -109,7 +132,7 @@ All endpoints under `http://<bind>:<port>`. Auth: `Authorization: Bearer <token>
 ```
 
 Actions are serialized: one runs per tick, in order. Single-tick actions
-(`look`, `say`, `select_slot`, `drop`, `swap_hands`, `respawn`,
+(`look`, `say`, `select_slot`, `select_item`, `drop`, `swap_hands`, `respawn`,
 `open_inventory`, `close_screen`, `click_slot`, `interact_entity`,
 `use_on_block`) bypass the queue and run immediately, so a long-held `move`
 can't starve them. Every action returns
@@ -150,8 +173,17 @@ OPENROUTER_API_KEY=... MCREMOTE_TOKEN=<token> \
   python3 agent/jev_agent.py "Craft a wooden pickaxe"
 ```
 
-`MAX_STEPS` (default 150) bounds the loop; the agent prints each decision with
-its probability and confidence.
+`MAX_STEPS` (default 150) bounds the loop; `STAGE_STEPS` bounds multi-stage
+tasks. The agent prints each decision with its probability and confidence and
+appends structured records to `/tmp/jev_decisions.jsonl` (step, pos, inventory,
+candidates, probs, pick, result) — useful for spotting where the policy
+dithers and whether the harness is missing context.
+
+Primitives only, by design: `move`/`jump`, `mine`, `use`, `select`, `craft`,
+`attack`, `place`/`use_on_block`. The model chooses *what* and *where*; the
+mod translates each pick into real client inputs. There is deliberately no
+`command`/chat-execution action — an agent playing the game can't `/give` or
+teleport its way out of a task.
 
 ## Design notes
 
@@ -163,6 +195,5 @@ its probability and confidence.
 - `walk_to` runs A* over the voxel grid (walk, +1 jumps, drops ≤4, headroom
   and dead-end-pit checks, ≤64-block range, ~12k expansions). When no full
   route exists it walks toward the closest reachable node and falls back to
-  straight-line steering; repeated failures report `stuck`.
-- There is deliberately no `command`/chat-execution action: an agent playing
-  the game can't `/give` or teleport its way out of a task.
+  straight-line steering; repeated failures report `stuck`. The JEV agent
+  intentionally doesn't use it — the model steers via bearing walks.

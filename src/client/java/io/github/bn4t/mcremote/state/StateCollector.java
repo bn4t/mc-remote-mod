@@ -65,6 +65,7 @@ public class StateCollector {
 		out.add("player", player(mc));
 		out.add("world", world(mc));
 		out.add("inventory", inventory(mc));
+		out.add("craftable", craftable(mc));
 		out.add("entities", entities(mc, blockRadius > 0 ? Math.max(blockRadius, 32) : 32));
 		out.add("looking_at", lookingAt(mc));
 		if (blockRadius > 0) {
@@ -108,6 +109,7 @@ public class StateCollector {
 				p.getBlockX(), p.getBlockZ());
 		o.addProperty("surface_y", surfY);
 		o.addProperty("sky_above", p.getBlockY() >= surfY);
+		o.addProperty("dimension", mc.level.dimension().identifier().toString());
 		o.add("terrain", terrain(mc, p));
 		JsonArray effects = new JsonArray();
 		for (MobEffectInstance e : p.getActiveEffects()) {
@@ -222,6 +224,43 @@ public class StateCollector {
 		}
 		inv.add("items", items);
 		return inv;
+	}
+
+	/** Exact output item ids the recipe manager proves craftable from the
+	 *  live inventory — split by grid size so the client knows what needs a
+	 *  crafting table. Derived from the real recipe book, not a lookup. */
+	private JsonObject craftable(Minecraft mc) {
+		LocalPlayer p = mc.player;
+		JsonObject out = new JsonObject();
+		JsonArray grid2 = new JsonArray();
+		JsonArray grid3 = new JsonArray();
+		try {
+			net.minecraft.world.entity.player.StackedItemContents sic =
+					new net.minecraft.world.entity.player.StackedItemContents();
+			var inv = p.getInventory();
+			for (int i = 0; i < inv.getContainerSize(); i++)
+				sic.accountStack(inv.getItem(i));
+			var ctx = net.minecraft.world.item.crafting.display
+					.SlotDisplayContext.fromLevel(mc.level);
+			for (net.minecraft.client.gui.screens.recipebook.RecipeCollection col
+					: p.getRecipeBook().getCollections()) {
+				for (net.minecraft.world.item.crafting.display.RecipeDisplayEntry e
+						: col.getRecipes()) {
+					int need = e.craftingRequirements()
+							.map(java.util.List::size).orElse(0);
+					if (need == 0 || !e.canCraft(sic)) continue;
+					for (ItemStack r : e.resultItems(ctx)) {
+						String nm = BuiltInRegistries.ITEM
+								.getKey(r.getItem()).toString();
+						if (need <= 4) grid2.add(nm); else grid3.add(nm);
+						break;
+					}
+				}
+			}
+		} catch (Throwable ignored) {}
+		out.add("2x2", grid2);
+		out.add("3x3", grid3);
+		return out;
 	}
 
 	private JsonObject item(ItemStack stack, int slot) {
@@ -364,9 +403,16 @@ public class StateCollector {
 		o.addProperty("size_y", sizeY);
 		o.addProperty("size_z", sizeZ);
 		// keep the closest interesting blocks: scan order is bottom-up, so
-		// without this deep ores would starve surface features under the cap
+		// without this deep ores would starve surface features under the cap.
+		// Cap per block type too — common fillers (stone etc.) would otherwise
+		// flood all 256 slots and starve rarer finds like tree logs.
 		notable.sort((a, b) -> Double.compare(distSq(a, center), distSq(b, center)));
-		while (notable.size() > 256) notable.remove(notable.size() - 1);
+		java.util.Map<String, Integer> perType = new java.util.HashMap<>();
+		notable.removeIf(n -> {
+			String base = n.get("block").getAsString().split("\\[")[0];
+			return perType.merge(base, 1, Integer::sum) > 24;
+		});
+		while (notable.size() > 512) notable.remove(notable.size() - 1);
 
 		JsonArray pal = new JsonArray();
 		for (String s : palette) pal.add(s);

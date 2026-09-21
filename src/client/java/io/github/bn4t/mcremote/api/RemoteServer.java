@@ -163,7 +163,7 @@ public class RemoteServer {
 		int radius = Math.min(parseInt(q.get("blocks"), 0), config.maxBlockRadius());
 		int below = parseInt(q.get("below"), Math.min(4, radius));
 		int above = parseInt(q.get("above"), radius > 0 ? radius : 0);
-		JsonObject result = onClient(() -> collector.snapshot(Minecraft.getInstance(), radius, below, above), 5000);
+		JsonObject result = onClient(() -> collector.snapshot(Minecraft.getInstance(), radius, below, above), 15000);
 		respond(ex, result.has("ok") ? 200 : 503, result);
 	}
 
